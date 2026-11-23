@@ -1,0 +1,36 @@
+name: ios-build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          brew install ldid xz make || true
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          make clean || true
+          make
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          find . -name '*.dylib' -not -path './out/*' -exec cp {} out/ \;
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hello-dylib
+          path: out/*.dylib
+          if-no-files-found: error
