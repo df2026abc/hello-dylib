@@ -67,6 +67,7 @@ typedef struct {
 
 extern Il2Kit g_kit;
 extern Il2CppDomain *g_domain;
+extern void *g_unity;
 
 // resolve every symbol through dlsym; returns count found (expected 17)
 int kit_resolve(void);

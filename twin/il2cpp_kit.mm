@@ -3,9 +3,11 @@
 //  pointer here is NULL and the caller bails instead of jumping into garbage.*
 #import "il2cpp_kit.h"
 #import <objc/runtime.h>
+#import <mach-o/dyld.h>
 #import <os/lock.h>
 
 Il2Kit g_kit = {0};
+void *g_unity = NULL;
 Il2CppDomain *g_domain = NULL;
 
 static struct { const char *name; void **slot; } kSymbols[] = {
@@ -28,10 +30,35 @@ static struct { const char *name; void **slot; } kSymbols[] = {
     {"il2cpp_method_get_name",                   (void **)&g_kit.method_get_name},
 };
 
+// UnityFramework is loaded lazily; until it is, dlsym(RTLD_DEFAULT) sees nothing
+static void *kit_open_unity(void) {
+    const char *paths[] = {
+        "UnityFramework",
+        "@rpath/UnityFramework.framework/UnityFramework",
+        "/private/var/containers/Bundle/Application",
+    };
+    void *h = dlopen(paths[0], RTLD_NOW | RTLD_NOLOAD);
+    if (h) return h;
+    h = dlopen("UnityFramework", RTLD_NOW | RTLD_GLOBAL);
+    if (h) return h;
+    // last resort: walk loaded images and dlopen the one matching the name
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "UnityFramework")) {
+            void *hh = dlopen(nm, RTLD_NOW | RTLD_GLOBAL);
+            if (hh) return hh;
+        }
+    }
+    return NULL;
+}
+
 int kit_resolve(void) {
+    // make sure the Unity runtime is mapped before looking for its exports
+    if (!g_unity) g_unity = kit_open_unity();
     int found = 0;
     for (size_t i = 0; i < sizeof(kSymbols) / sizeof(kSymbols[0]); i++) {
         void *sym = dlsym(RTLD_DEFAULT, kSymbols[i].name);
+        if (!sym && g_unity) sym = dlsym(g_unity, kSymbols[i].name);
         *kSymbols[i].slot = sym;
         if (sym) found++;
     }
