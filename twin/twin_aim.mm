@@ -171,7 +171,7 @@ static void quat_to_yaw_pitch(Quat q, float *yaw, float *pitch) {
         void *best = NULL;
         float bestD2 = 1e9f;
         for (size_t i = 0; i < cache->bounds.length; i++) {
-            Il2CppObject *pm = kit_arr_at(cache, i);
+            Il2CppObject *pm = (Il2CppObject *)kit_arr_at(cache, i);
             if (!pm) continue;
             Il2CppObject *tr = kit_invoke(m_pm_get_tr, pm, NULL);
             if (!tr || tr == camTr) continue;

@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#include <math.h>
 
 // switches + slider, read by twin_esp / twin_aim / shield
 bool  twin_cfg_aim    = true;
@@ -72,7 +73,7 @@ static const CGFloat kPanelW = 260.f;
     const CGFloat tickOut = r * 0.96, tickIn = r * 0.72;
     for (int i = 0; i < 4; i++) {
         // ticks sit on the vertical/horizontal axes; draw as short thick strokes
-        CGContextSetStrokeColorWithColor(ctx, ticks[i].CGColor);
+        CGContextSetStrokeColorWithColor(ctx, gold.CGColor);
         if (i == 0) { CGContextMoveToPoint(ctx, cx, cy - tickIn); CGContextAddLineToPoint(ctx, cx, cy - tickOut); }
         if (i == 1) { CGContextMoveToPoint(ctx, cx + tickIn, cy); CGContextAddLineToPoint(ctx, cx + tickOut, cy); }
         if (i == 2) { CGContextMoveToPoint(ctx, cx, cy + tickIn); CGContextAddLineToPoint(ctx, cx, cy + tickOut); }

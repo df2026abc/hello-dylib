@@ -6,6 +6,9 @@
 #import "il2cpp_kit.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#include <stdint.h>
+#include <string.h>
+#include <math.h>
 
 typedef struct { float x, y, z; } Vec3;
 
@@ -191,11 +194,11 @@ static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
         // re-latch the local side on every scene swap (round end, side switch);
         // a stale value would paint teammates as enemies for the whole match
         static uint64_t last_latch;
-        uint64_t now = (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
-        if (g_cache && (!g_have_self_side || now - last_latch > 2000)) {
-            last_latch = now;
+        uint64_t latchNow = (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+        if (g_cache && (!g_have_self_side || latchNow - last_latch > 2000)) {
+            last_latch = latchNow;
             for (size_t i = 0; i < g_cache->bounds.length; i++) {
-                Il2CppObject *pm = kit_arr_at(g_cache, i);
+                Il2CppObject *pm = (Il2CppObject *)kit_arr_at(g_cache, i);
                 if (!pm) continue;
                 int32_t sv = read_side(pm);
                 if (sv != INT32_MIN) { g_self_side = sv; g_have_self_side = YES; break; }
@@ -215,7 +218,7 @@ static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
             Il2CppArray *arr = sets[si];
             if (!arr) continue;
             for (size_t i = 0; i < arr->bounds.length; i++) {
-                Il2CppObject *pm = kit_arr_at(arr, i);
+                Il2CppObject *pm = (Il2CppObject *)kit_arr_at(arr, i);
                 if (!pm) continue;
                 Il2CppObject *tr = kit_invoke(m_pm_get_tr, pm, NULL);
                 if (!tr) continue;
