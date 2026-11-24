@@ -1,7 +1,6 @@
-// cf_esp.mm — CounterFlame (CS2手游) 透视探测 + 悬浮窗
+// cf_esp.mm — CounterFlame (CS2手游) 探测版 v2
 //
-// 这个版本只做探测，不画框。
-// 目的：一次跑完，拿到坐标/相机/玩家列表的实际数据，确认能用再画框。
+// 只探测，不画框。目的：一次跑完确认玩家里程碑。
 //
 // 编译：
 //   clang++ -arch arm64 -dynamiclib -fobjc-arc -std=c++17 \
@@ -15,14 +14,21 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <dlfcn.h>
-#include <math.h>
-#include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 // ============================================================
 // il2cpp
 // ============================================================
+typedef struct Il2CppArray {
+    void *klass;
+    void *monitor;
+    void *bounds;
+    size_t max_length;
+    void *vector[1];
+} Il2CppArray;
+
 typedef void*  (*p_domain_get)(void);
 typedef void** (*p_domain_get_assemblies)(void*, size_t*);
 typedef void*  (*p_assembly_get_image)(void*);
@@ -37,8 +43,10 @@ typedef size_t (*p_field_get_offset)(void*);
 typedef void*  (*p_class_get_fields)(void*, void**);
 typedef const char* (*p_field_get_name)(void*);
 typedef void*  (*p_object_unbox)(void*);
-typedef void*  (*p_gchandle_get_target)(uint32_t);
-typedef uint32_t (*p_gchandle_new)(void*, int);
+typedef void*  (*p_class_get_type)(void*);
+typedef void*  (*p_type_get_object)(void*);
+typedef void*  (*p_array_new)(void*, size_t);
+typedef void*  (*p_object_new)(void*);
 
 static p_domain_get            f_domain;
 static p_domain_get_assemblies f_asm;
@@ -54,8 +62,10 @@ static p_field_get_offset      f_foff;
 static p_class_get_fields      f_fields;
 static p_field_get_name        f_fname;
 static p_object_unbox          f_unbox;
-static p_gchandle_get_target   f_gch_target;
-static p_gchandle_new          f_gch_new;
+static p_class_get_type        f_get_type;
+static p_type_get_object       f_type_obj;
+static p_array_new             f_array_new;
+static p_object_new            f_obj_new;
 
 static void *sym(const char *n) {
     void *p = dlsym(RTLD_DEFAULT, n);
@@ -77,10 +87,13 @@ static BOOL resolve(void) {
     f_fields  = (p_class_get_fields)sym("il2cpp_class_get_fields");
     f_fname   = (p_field_get_name)sym("il2cpp_field_get_name");
     f_unbox   = (p_object_unbox)sym("il2cpp_object_unbox");
-    f_gch_target = (p_gchandle_get_target)sym("il2cpp_gchandle_get_target");
-    f_gch_new    = (p_gchandle_new)sym("il2cpp_gchandle_new");
+    f_get_type= (p_class_get_type)sym("il2cpp_class_get_type");
+    f_type_obj= (p_type_get_object)sym("il2cpp_type_get_object");
+    f_array_new = (p_array_new)sym("il2cpp_array_new");
+    f_obj_new   = (p_object_new)sym("il2cpp_object_new");
     return f_domain && f_asm && f_img && f_cnt && f_cls && f_cname &&
-           f_method && f_invoke && f_attach && f_foff;
+           f_method && f_invoke && f_attach && f_foff && f_fields &&
+           f_fname && f_unbox && f_get_type && f_type_obj && f_array_new;
 }
 
 // ============================================================
@@ -98,26 +111,9 @@ static void w(const char *fmt, ...) {
 
 static void open_log(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *dir = paths.firstObject;
-    NSString *p = [dir stringByAppendingPathComponent:@"cf_esp.txt"];
+    NSString *p = [paths.firstObject stringByAppendingPathComponent:@"cf_esp.txt"];
     g_fp = fopen(p.UTF8String, "w");
 }
-
-// ============================================================
-// 已知偏移（实测）
-// ============================================================
-static const uint32_t OFF_PC_MAIN_CAMERA  = 0x30;
-static const uint32_t OFF_PC_MOVEMENT     = 0x40;
-static const uint32_t OFF_PC_VIEW         = 0x80;
-static const uint32_t OFF_PC_PLAYER       = 0x90;
-static const uint32_t OFF_PC_IS_DEATH     = 0xa8;
-
-static const uint32_t OFF_PM_CAM_TRANSFORM = 0x30;
-static const uint32_t OFF_PM_SELF_ROOT     = 0x188;
-static const uint32_t OFF_PM_CURR_SIM_POS  = 0x268;
-
-static const uint32_t OFF_SK_HEAD_BONE     = 0xc0;
-static const uint32_t OFF_SK_CHEST_BONE    = 0xc8;
 
 // ============================================================
 // 类
@@ -126,6 +122,7 @@ static void *cls_pc = NULL;
 static void *cls_pm = NULL;
 static void *cls_sk = NULL;
 static void *cls_cam = NULL;
+static void *cls_obj = NULL;
 static void *cls_tf = NULL;
 
 static void *find_class(const char *ns, const char *name) {
@@ -153,113 +150,97 @@ static void *find_class(const char *ns, const char *name) {
 }
 
 // ============================================================
-// 读内存
+// 用 il2cpp_class_get_type + type_get_object 造 typeof(T)
 // ============================================================
-typedef struct { float x, y, z; } V3;
-
-static void *read_ptr(void *obj, uint32_t off) {
-    if (!obj) return NULL;
-    uint8_t *p = (uint8_t *)obj + off;
-    return *(void **)p;
-}
-
-static V3 read_v3(void *obj, uint32_t off) {
-    V3 v = {0, 0, 0};
-    if (!obj) return v;
-    uint8_t *p = (uint8_t *)obj + off;
-    memcpy(&v, p, sizeof(V3));
-    return v;
-}
-
-static BOOL read_bool(void *obj, uint32_t off) {
-    if (!obj) return NO;
-    return *(uint8_t *)((uint8_t *)obj + off) != 0;
-}
-
-// ============================================================
-// 拿玩家列表：FindObjectsOfType
-// ============================================================
-// FindObjectsOfType(Type) returns an Il2CppArray of instances
-typedef struct { void *klass; void *monitor; struct { size_t length; } bounds; void *vector; } Il2CppArray;
-typedef struct { void *m_p0; void *m_p1; } Method;
-
-static void *get_objects_of_type(void *target_klass, int *outCount) {
-    *outCount = 0;
-    if (!target_klass || !f_method || !f_invoke) return NULL;
-
-    void *obj_klass = find_class("UnityEngine", "Object");
-    if (!obj_klass) return NULL;
-
-    void *m = NULL;
-    for (int argc = 1; argc <= 2 && !m; argc++)
-        m = f_method(obj_klass, "FindObjectsOfType", argc);
-    if (!m) return NULL;
-
-    // build the System.Type token for the target class
-    void *type_klass = find_class("System", "Type");
-    (void)type_klass;
-
-    // il2cpp_class_get_type + il2cpp_type_get_object
-    typedef void *(*p_class_get_type)(void *);
-    typedef void *(*p_type_get_object)(void *);
-    p_class_get_type cgt = (p_class_get_type)sym("il2cpp_class_get_type");
-    p_type_get_object tgo = (p_type_get_object)sym("il2cpp_type_get_object");
-    if (!cgt || !tgo) return NULL;
-    void *t = cgt(target_klass);
-    void *typeObj = t ? tgo(t) : NULL;
-    if (!typeObj) return NULL;
-
+static void *make_system_type(void *klass) {
+    if (!klass || !f_get_type || !f_type_obj) return NULL;
+    void *t = f_get_type(klass);
+    if (!t) return NULL;
     void *exc = NULL;
-    if (m) {
-        int32_t inc = 0;
-        void *args2[2] = { typeObj, &inc };
-        Il2CppArray *arr = (Il2CppArray *)f_invoke(m, NULL, args2, &exc);
-        if (arr && arr->bounds.length) { *outCount = (int)arr->bounds.length; return arr; }
-    }
-    return NULL;
+    return f_type_obj(t);   // 返回 UnityEngine.Object 的 System.Type 对象
 }
 
-static void *arr_at(Il2CppArray *a, size_t i) {
-    if (!a || i >= a->bounds.length) return NULL;
-    return ((void **)a->vector)[i];
+// ============================================================
+// FindObjectsOfType(Type)
+// ============================================================
+static Il2CppArray *find_objects_of_type(void *klass) {
+    if (!klass || !cls_obj) return NULL;
+
+    void *m = f_method(cls_obj, "FindObjectsOfType", 1);
+    if (!m) m = f_method(cls_obj, "FindObjectsOfTypeAll", 1);
+    if (!m) { w("  没有 FindObjectsOfType 方法\n"); return NULL; }
+
+    void *type = make_system_type(klass);
+    if (!type) { w("  make_system_type 失败\n"); return NULL; }
+
+    void *params[1] = { type };
+    void *exc = NULL;
+    void *ret = f_invoke(m, NULL, params, &exc);   // 静态方法，obj 传 NULL
+    if (exc) { w("  invoke 抛异常\n"); return NULL; }
+    if (!ret) { w("  invoke 返回空\n"); return NULL; }
+
+    return (Il2CppArray *)ret;
 }
 
 // ============================================================
 // 探测
 // ============================================================
 static void probe(void) {
-    w("\n===== PROBE START =====\n");
-    w("cls_pc=%p cls_pm=%p cls_sk=%p cls_cam=%p cls_tf=%p\n",
-      cls_pc, cls_pm, cls_sk, cls_cam, cls_tf);
+    w("\n===== PROBE v2 =====\n");
+    w("cls_pc=%p cls_pm=%p cls_sk=%p cls_cam=%p cls_obj=%p cls_tf=%p\n",
+      cls_pc, cls_pm, cls_sk, cls_cam, cls_obj, cls_tf);
+
     if (!cls_pc) { w("PlayerController 没找到\n"); return; }
 
-    int n = 0;
-    void *arr = get_objects_of_type(cls_pc, &n);
-    w("PlayerController 实例数: %d\n", n);
-    if (!arr) { w("拿不到实例列表\n"); return; }
-
-    for (int i = 0; i < n && i < 20; i++) {
-        void *pc = arr_at((Il2CppArray *)arr, i);
-        if (!pc) continue;
-        void *cam    = read_ptr(pc, OFF_PC_MAIN_CAMERA);
-        void *move   = read_ptr(pc, OFF_PC_MOVEMENT);
-        void *player = read_ptr(pc, OFF_PC_PLAYER);
-        BOOL dead    = read_bool(pc, OFF_PC_IS_DEATH);
-        V3 pos = move ? read_v3(move, OFF_PM_CURR_SIM_POS) : (V3){0,0,0};
-        void *tf = move ? read_ptr(move, OFF_PM_CAM_TRANSFORM) : NULL;
-        w("  [%d] pc=%p cam=%p move=%p player=%p dead=%d\n", i, pc, cam, move, player, dead);
-        w("      pos=(%.2f %.2f %.2f)  camTf=%p\n", pos.x, pos.y, pos.z, tf);
+    // 1) 打印 PlayerController 全部字段
+    w("\n--- PlayerController 字段 ---\n");
+    void *iter = NULL, *fld = NULL;
+    while ((fld = f_fields(cls_pc, &iter)) != NULL) {
+        const char *fn = f_fname(fld);
+        size_t off = f_foff(fld);
+        if (fn) w("  %-36s 0x%zx\n", fn, off);
     }
 
-    w("\n--- PlayerController 字段 ---\n");
-    if (f_fields) {
-        void *iter = NULL, *fld = NULL;
-        while ((fld = f_fields(cls_pc, &iter)) != NULL) {
-            const char *fn = f_fname(fld);
-            size_t off = f_foff(fld);
-            if (fn) w("  %-36s 0x%zx\n", fn, off);
+    // 2) 找实例
+    w("\n--- FindObjectsOfType(PlayerController) ---\n");
+    Il2CppArray *arr = find_objects_of_type(cls_pc);
+    if (!arr) { w("  拿到空\n"); return; }
+
+    size_t len = arr->max_length;
+    w("  实例数量: %zu\n", len);
+    if (len == 0) { w("  场上没有玩家（可能不在对局里）\n"); return; }
+
+    // 3) 打印前几个对象的字段值
+    int show = (int)(len > 8 ? 8 : len);
+    for (int i = 0; i < show; i++) {
+        void *obj = arr->vector[i];
+        if (!obj) continue;
+        w("\n  [%d] obj=%p\n", i, obj);
+
+        uint8_t *base = (uint8_t *)obj;
+        void *view    = *(void **)(base + 0x80);
+        void *player  = *(void **)(base + 0x90);
+        void *cam     = *(void **)(base + 0x30);
+        uint8_t dead  = *(uint8_t *)(base + 0xa8);
+
+        w("    _view=%p  _player=%p  _mainCamera=%p  _isDeath=%d\n",
+          view, player, cam, dead);
+
+        // 通过 _movementController 拿坐标
+        void *mv = *(void **)(base + 0x40);
+        if (mv) {
+            float pos[3];
+            memcpy(pos, (uint8_t *)mv + 0x268, 12);
+            w("    movement=%p  坐标=(%.2f, %.2f, %.2f)\n", mv, pos[0], pos[1], pos[2]);
+        }
+
+        // 找 Skeleton
+        void *sk = NULL;
+        if (cls_sk && mv) {
+            // 通过 PlayerCulling / 名字找
         }
     }
+
     w("\n===== PROBE END =====\n");
 }
 
@@ -271,18 +252,20 @@ static void init(void) {
     open_log();
     w("dylib loaded\n");
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(35 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
         @autoreleasepool {
-            if (g_fp) w("resolve: %s\n", resolve() ? "OK" : "FAIL");
+            BOOL ok = resolve();
+            w("resolve: %s\n", ok ? "OK" : "FAIL");
+            if (!ok) return;
 
-            if (!f_domain) return;
             f_attach(f_domain());
 
             cls_pc  = find_class(NULL, "PlayerController");
             cls_pm  = find_class(NULL, "PlayerMovement");
             cls_sk  = find_class("ScarletWork.Game", "PlayerSkeleton");
             cls_cam = find_class("UnityEngine", "Camera");
+            cls_obj = find_class("UnityEngine", "Object");
             cls_tf  = find_class("UnityEngine", "Transform");
 
             probe();
