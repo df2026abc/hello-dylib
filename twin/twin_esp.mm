@@ -18,34 +18,36 @@ extern bool twin_cfg_esp;
 extern float twin_cfg_opacity;
 
 @interface TwinEspLayer : UIView
-@property (nonatomic, strong) NSMutableArray<UIView *> *pool;
+@property (nonatomic, strong) NSMutableArray<NSValue *> *boxes;
 - (void)setRects:(NSArray<NSValue *> *)rects;
 @end
+
 @implementation TwinEspLayer
 - (instancetype)initWithFrame:(CGRect)f {
     if (self = [super initWithFrame:f]) {
         self.userInteractionEnabled = NO;
         self.backgroundColor = UIColor.clearColor;
-        self.pool = [NSMutableArray array];
+        self.opaque = NO;
+        self.boxes = [NSMutableArray array];
     }
     return self;
 }
+
+// KAlert draws its boxes by overriding drawRect: and stroking rects directly,
+// which keeps one layer instead of allocating a view per target.
 - (void)setRects:(NSArray<NSValue *> *)rects {
-    NSUInteger need = rects.count;
-    while (self.pool.count < need) {
-        UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
-        box.userInteractionEnabled = NO;
-        box.backgroundColor = UIColor.clearColor;
-        box.layer.borderWidth = 1.5;
-        box.hidden = YES;
-        [self addSubview:box];
-        [self.pool addObject:box];
-    }
-    UIColor *green = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:twin_cfg_opacity];
-    for (NSUInteger i = 0; i < self.pool.count; i++) {
-        UIView *box = self.pool[i];
-        if (i < need) { box.layer.borderColor = green.CGColor; box.frame = [rects[i] CGRectValue]; box.hidden = NO; }
-        else box.hidden = YES;
+    self.boxes = [rects mutableCopy] ?: [NSMutableArray array];
+    [self setNeedsDisplay];
+}
+
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx || self.boxes.count == 0) return;
+    CGContextSetStrokeColorWithColor(ctx,
+        [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:twin_cfg_opacity].CGColor);
+    CGContextSetLineWidth(ctx, 1.5);
+    for (NSValue *v in self.boxes) {
+        CGContextStrokeRect(ctx, [v CGRectValue]);
     }
 }
 @end
