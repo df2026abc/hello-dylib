@@ -5,12 +5,15 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+
+extern NSString *g_twin_probe_text;
+extern void twin_probe_run(void);
 #include <math.h>
 
 // switches + slider, read by twin_esp / twin_aim / shield
-bool  twin_cfg_aim    = true;
-bool  twin_cfg_esp    = true;
-bool  twin_cfg_shield = true;
+bool  twin_cfg_aim    = false;
+bool  twin_cfg_esp    = false;
+bool  twin_cfg_shield = false;
 float twin_cfg_opacity = 0.38f;
 bool  twin_cfg_aim_body = false;   // false = lock head, true = lock body
 
@@ -280,6 +283,15 @@ static const CGFloat kPanelW = 260.f;
 - (void)doUnban {
     NSDictionary *r = twin_unban_clear();
     self.status.text = r[@"needsColdStart"] ? @"设备指纹已重置，冷启动生效" : @"重置完成";
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // refresh diagnostics whenever the panel opens
+    twin_probe_run();
+    self.status.text = g_twin_probe_text ?: @"(probe empty)";
+    self.status.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    self.status.numberOfLines = 0;
 }
 
 - (void)doClose { [self dismissViewControllerAnimated:YES completion:nil]; }
