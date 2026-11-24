@@ -206,6 +206,7 @@ static float g_headOff = 0.75f; // 头顶偏移（抬多高）
     if (self) {
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
+        self.opaque = NO;
         _rects = [NSMutableArray array];
     }
     return self;
@@ -237,9 +238,12 @@ static void tick(void) {
     }
 
     Il2CppArray *arr = find_objects(cls_pc);
+    static int tickCount = 0;
+    if (tickCount < 3) { w("[tick] arr=%p\n", arr); }
     if (!arr) return;
 
     size_t len = arr->max_length;
+    if (tickCount < 3) { w("[tick] 实例数=%zu\n", len); }
     NSMutableArray *rects = [NSMutableArray array];
 
     // 屏幕尺寸
@@ -251,24 +255,30 @@ static void tick(void) {
         void *pc = arr->vector[i];
         if (!pc) continue;
 
-        // 死亡跳过
         uint8_t dead = *(uint8_t*)((uint8_t*)pc + 0xa8);
-        if (dead) continue;
-
         void *mv = rdp(pc, 0x40);
         void *cam = rdp(pc, 0x30);
+        V3 pos = mv ? rd3(mv, 0x268) : (V3){0,0,0};
+        if (tickCount < 3) {
+            w("  [%zu] pc=%p dead=%d mv=%p cam=%p pos=(%.2f %.2f %.2f)\n",
+              i, pc, dead, mv, cam, pos.x, pos.y, pos.z);
+        }
+        if (dead) continue;
         if (!mv || !cam) continue;
-
-        V3 pos = rd3(mv, 0x268);
         if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
 
         // 头顶抬高一点
         V3 head = { pos.x, pos.y + g_headOff, pos.z };
         V3 foot = pos;
 
-        V3 sHead, sFoot;
-        if (!world_to_screen(cam, head, &sHead)) continue;
-        if (!world_to_screen(cam, foot, &sFoot)) continue;
+        V3 sHead = {0,0,0}, sFoot = {0,0,0};
+        BOOL okh = world_to_screen(cam, head, &sHead);
+        BOOL okf = world_to_screen(cam, foot, &sFoot);
+        if (tickCount < 3) {
+            w("      world%s head=(%.1f %.1f %.1f) foot=(%.1f %.1f %.1f)\n",
+              (okh && okf) ? " OK" : " FAIL", sHead.x, sHead.y, sHead.z, sFoot.x, sFoot.y, sFoot.z);
+        }
+        if (!okh || !okf) continue;
 
         // 屏幕外的跳过
         if (sHead.z < 0 || sFoot.z < 0) continue;
@@ -281,11 +291,13 @@ static void tick(void) {
         if (h < 4 || h > sh) continue;
         CGFloat wpx = h * g_boxW;
 
-        CGFloat cx = sHead.x;
+        CGFloat cx = (sh - sHead.x);   // 这里 x 也用屏幕宽换算
+        cx = sHead.x;
         CGRect r = CGRectMake(cx - wpx * 0.5f, yHead, wpx, h);
         [rects addObject:[NSValue valueWithCGRect:r]];
     }
 
+    if (tickCount < 3) { w("[tick] 出框数=%lu\n", (unsigned long)rects.count); tickCount++; }
     g_view.rects = rects;
     [g_view setNeedsDisplay];
 }
