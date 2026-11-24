@@ -1,0 +1,59 @@
+name: build-twin
+
+on:
+  push:
+    paths: ['twin/**']
+  workflow_dispatch:
+
+jobs:
+  build:
+    # ubuntu runners queue far faster than macOS ones and clang can cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm zip unzip xz-utils make
+
+      - name: Fetch iOS SDK
+        run: |
+          mkdir -p $HOME/sdk && cd $HOME/sdk
+          # theos/sdks publishes each SDK as a release asset
+          curl -L --fail -o sdk.zip https://github.com/theos/sdks/releases/download/master/iPhoneOS15.6.sdk.zip
+          unzip -q sdk.zip
+          ls -d $HOME/sdk/*.sdk
+
+      - name: Build twin.dylib
+        run: |
+          SDK=$(ls -d $HOME/sdk/*.sdk | head -1)
+          echo "SDK=$SDK"
+          clang++ \
+            -target arm64-apple-ios15.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc -std=c++17 -O2 \
+            -fuse-ld=lld \
+            -Wl,-undefined,dynamic_lookup \
+            -Wl,-install_name,@executable_path/twin.dylib \
+            -framework UIKit -framework Foundation -framework QuartzCore \
+            -framework CoreGraphics -framework Security \
+            -dynamiclib \
+            -o twin.dylib \
+            twin/il2cpp_kit.mm twin/twin_esp.mm twin/twin_aim.mm \
+            twin/twin_backup.mm twin/twin_unban.mm twin/twin_shield.mm \
+            twin/twin_ui.mm twin/bypass.mm
+          ls -l twin.dylib
+          file twin.dylib || true
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          cp twin.dylib out/
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twin-dylib
+          path: out/*.dylib
+          if-no-files-found: error
