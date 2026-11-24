@@ -67,8 +67,10 @@ static void twin_probe_boot(void) {
     // wait for the game to finish loading, then write one report
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!kit_resolve()) {
-            NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-            append([docs stringByAppendingPathComponent:@"twin_probe.txt"], @"kit_resolve FAILED: il2cpp symbols not exported\n");
+            // shared container is easier to reach with Filza than the app sandbox
+            NSString *shared = @"/var/mobile/Documents";
+            [[NSFileManager defaultManager] createDirectoryAtPath:shared withIntermediateDirectories:YES attributes:nil error:nil];
+            append([shared stringByAppendingPathComponent:@"twin_probe.txt"], @"kit_resolve FAILED: il2cpp symbols not exported\n");
             return;
         }
         NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -85,6 +87,8 @@ static void twin_probe_boot(void) {
         [report appendString:count_instances("RemoteBody")];
         [report appendString:count_instances("BotController")];
         append(path, report);
+        // second copy into the shared container so it can be found without digging
+        append([@"/var/mobile/Documents" stringByAppendingPathComponent:@"twin_probe.txt"], report);
 
         // also mirror to the log so it is visible in Console
         NSLog(@"[twin] probe written to %@", path);

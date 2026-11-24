@@ -183,7 +183,8 @@ static const CGFloat kPanelW = 260.f;
     self.page2 = [[UIStackView alloc] init];
     self.page2.axis = UILayoutConstraintAxisVertical;
     self.page2.spacing = 10;
-    self.page2.hidden = YES;
+    self.page2.alpha = 0.0;
+    self.page2.userInteractionEnabled = NO;
     [self.stack addArrangedSubview:self.page2];
 
     [self addSwitch:@"自瞄" tag:1 on:twin_cfg_aim to:self.page2];
@@ -240,8 +241,11 @@ static const CGFloat kPanelW = 260.f;
 
 - (void)tabChanged:(UISegmentedControl *)seg {
     BOOL draw = (seg.selectedSegmentIndex == 0);
-    self.page1.hidden = !draw;
-    self.page2.hidden = draw;
+    // both pages stay in the layout (alpha 0, not hidden) so the card never resizes
+    self.page1.alpha = draw ? 1.0 : 0.0;
+    self.page2.alpha = draw ? 0.0 : 1.0;
+    self.page1.userInteractionEnabled = draw;
+    self.page2.userInteractionEnabled = !draw;
 }
 
 - (void)aimPartChanged:(UISegmentedControl *)seg {
