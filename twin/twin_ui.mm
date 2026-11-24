@@ -289,7 +289,10 @@ static const CGFloat kPanelW = 260.f;
     [super viewDidAppear:animated];
     // refresh diagnostics whenever the panel opens
     twin_probe_run();
-    self.status.text = g_twin_probe_text ?: @"(probe empty)";
+    // diagnostics only make sense while a feature is armed
+    BOOL anyOn = twin_cfg_esp || twin_cfg_aim || twin_cfg_shield;
+    self.status.text = anyOn ? (g_twin_probe_text ?: @"") : @"";
+    self.status.hidden = !anyOn;
     self.status.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
     self.status.numberOfLines = 0;
 }
