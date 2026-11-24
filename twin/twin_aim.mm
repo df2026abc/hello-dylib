@@ -26,7 +26,7 @@ static int   cfg_switch_cd    = 800;
 static Il2CppClass  *c_player_controller, *c_camera, *c_transform, *c_anim;
 static Il2CppMethod *m_find_all, *m_pc_get_player, *m_pc_get_team;
 static Il2CppMethod *m_net_get_transform, *m_tr_get_pos, *m_tr_get_rot, *m_tr_set_rot;
-static Il2CppMethod *m_cam_main, *m_bone_transform;
+static Il2CppMethod *m_cam_main, *m_bone_transform, *m_set_forward, *m_set_euler;
 static int32_t g_self_team = INT32_MIN;
 
 static uint64_t t_start, t_pending_at, t_last_switch;
@@ -63,6 +63,8 @@ static int resolve_aim(void) {
     if (!m_pc_get_player) m_pc_get_player = kit_method(c_player_controller, "get_Player", 0);
     if (!m_pc_get_team)   m_pc_get_team   = kit_method(c_player_controller, "get_Team", 0);
     if (!m_cam_main)      m_cam_main      = kit_method(c_camera, "get_MainCamera", 0);
+    if (!m_set_forward)   m_set_forward   = kit_method(c_transform, "set_forward", 1);
+    if (!m_set_euler)     m_set_euler     = kit_method(c_transform, "set_eulerAngles", 1);
     if (!m_tr_get_pos)    m_tr_get_pos    = kit_method(c_transform, "get_position", 0);
     if (!m_tr_get_rot)    m_tr_get_rot    = kit_method(c_transform, "get_rotation", 0);
     if (!m_tr_set_rot)    m_tr_set_rot    = kit_method(c_transform, "set_rotation", 1);
@@ -225,7 +227,14 @@ static void to_yaw_pitch(Quat q, float *yaw, float *pitch) {
         float dt = 1.f / 60.f;
         float ny = curYaw + humanize(norm180(wantYaw - curYaw), dt);
         float np = clampf(curPitch + humanize(wantPitch - curPitch, dt), -89.f, 89.f);
-        set_rot(camTr, from_yaw_pitch(ny, np));
+        // aim with a forward vector; KAlert sets forward rather than raw rotation
+        Vec3 dir = { sinf(ny / kDeg) * cosf(np / kDeg), -sinf(np / kDeg), cosf(ny / kDeg) * cosf(np / kDeg) };
+        if (m_set_forward) {
+            void *args[1] = { &dir };
+            kit_invoke(m_set_forward, camTr, args);
+        } else {
+            set_rot(camTr, from_yaw_pitch(ny, np));
+        }
     }
     (void)link;
 }
