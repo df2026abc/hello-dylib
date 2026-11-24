@@ -31,19 +31,61 @@ static const CGFloat kPanelW = 260.f;
 @implementation TwinBall
 - (instancetype)initWithFrame:(CGRect)f {
     if (self = [super initWithFrame:f]) {
-        self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+        self.backgroundColor = UIColor.clearColor;
+        self.userInteractionEnabled = YES;
         self.layer.cornerRadius = kBall / 2;
-        self.layer.borderWidth = 1.5;
-        self.layer.borderColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:0.9].CGColor;
-        UILabel *l = [[UILabel alloc] initWithFrame:self.bounds];
-        l.text = @"T";
-        l.textColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
-        l.font = [UIFont boldSystemFontOfSize:19];
-        l.textAlignment = NSTextAlignmentCenter;
-        l.userInteractionEnabled = NO;
-        [self addSubview:l];
+        self.layer.masksToBounds = YES;
+        self.opaque = NO;
+        [self setNeedsDisplay];
     }
     return self;
+}
+
+// dark green disc, gold ring, four reticle ticks, POS wordmark
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) return;
+    const CGFloat w = rect.size.width, h = rect.size.height;
+    const CGFloat cx = w / 2, cy = h / 2;
+    const CGFloat r = MIN(w, h) / 2 - 1.0;
+
+    UIColor *deepGreen = [UIColor colorWithRed:0.055 green:0.275 blue:0.184 alpha:1.0];
+    UIColor *gold = [UIColor colorWithRed:0.937 green:0.796 blue:0.561 alpha:1.0];
+    UIColor *cream = [UIColor colorWithRed:0.976 green:0.906 blue:0.737 alpha:1.0];
+
+    // body
+    CGContextSetFillColorWithColor(ctx, deepGreen.CGColor);
+    CGContextFillEllipseInRect(ctx, CGRectMake(1, 1, w - 2, h - 2));
+
+    // outer ring
+    CGContextSetStrokeColorWithColor(ctx, gold.CGColor);
+    CGContextSetLineWidth(ctx, MAX(1.5, r * 0.08));
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - r * 0.97, cy - r * 0.97, r * 1.94, r * 1.94));
+
+    // inner hairline circle
+    CGContextSetLineWidth(ctx, MAX(0.75, r * 0.03));
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - r * 0.66, cy - r * 0.66, r * 1.32, r * 1.32));
+
+    // four reticle ticks at the compass points
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineWidth(ctx, MAX(1.5, r * 0.09));
+    const CGFloat tickOut = r * 0.96, tickIn = r * 0.72;
+    for (int i = 0; i < 4; i++) {
+        // ticks sit on the vertical/horizontal axes; draw as short thick strokes
+        CGContextSetStrokeColorWithColor(ctx, ticks[i].CGColor);
+        if (i == 0) { CGContextMoveToPoint(ctx, cx, cy - tickIn); CGContextAddLineToPoint(ctx, cx, cy - tickOut); }
+        if (i == 1) { CGContextMoveToPoint(ctx, cx + tickIn, cy); CGContextAddLineToPoint(ctx, cx + tickOut, cy); }
+        if (i == 2) { CGContextMoveToPoint(ctx, cx, cy + tickIn); CGContextAddLineToPoint(ctx, cx, cy + tickOut); }
+        if (i == 3) { CGContextMoveToPoint(ctx, cx - tickIn, cy); CGContextAddLineToPoint(ctx, cx - tickOut, cy); }
+        CGContextStrokePath(ctx);
+    }
+
+    // POS wordmark in cream, slightly left of centre like the artwork
+    UIFont *f = [UIFont boldSystemFontOfSize:r * 0.82];
+    NSDictionary *attrs = @{ NSFontAttributeName: f, NSForegroundColorAttributeName: cream };
+    NSString *word = @"POS";
+    CGSize sz = [word sizeWithAttributes:attrs];
+    [word drawAtPoint:CGPointMake(cx - sz.width / 2 + r * 0.02, cy - sz.height / 2) withAttributes:attrs];
 }
 @end
 
