@@ -20,9 +20,9 @@ jobs:
       - name: Fetch iOS SDK
         run: |
           mkdir -p $HOME/sdk && cd $HOME/sdk
-          # theos/sdks publishes each SDK as a release asset
-          curl -L --fail -o sdk.zip https://github.com/theos/sdks/releases/download/master/iPhoneOS15.6.sdk.zip
-          unzip -q sdk.zip
+          # release assets are .tar.xz, tag master-146e41f
+          curl -L --fail -o sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz
+          tar -xJf sdk.tar.xz
           ls -d $HOME/sdk/*.sdk
 
       - name: Build twin.dylib
