@@ -60,6 +60,9 @@ static Il2CppMethod *m_cam_w2s;
 static Il2CppMethod *m_net_try_pos;
 
 static TwinEspLayer *g_layer;
+// per-step diagnostics surfaced on the panel so a dead chain is obvious
+NSString *g_esp_diag = nil;
+static int g_pc_count = 0, g_cam_ok = 0, g_player_ok = 0, g_pos_ok = 0, g_w2s_ok = 0;
 static BOOL g_ready;
 static int32_t g_team = INT32_MIN;
 static Il2CppArray *g_cache;
@@ -175,7 +178,20 @@ static BOOL project(Il2CppObject *cam, Vec3 w, CGPoint *out) {
             Il2CppObject *pc = (Il2CppObject *)kit_arr_at(g_cache, i);
             if (pc) cam = inv0(m_pc_main_cam, pc);
         }
+        g_cam_ok = cam ? 1 : 0;
+        {
+            NSMutableString *d = [NSMutableString string];
+            [d appendFormat:@"PlayerController: %d live\n", g_pc_count];
+            [d appendFormat:@"get_MainCamera: %@\n", g_cam_ok ? @"OK" : @"NULL"];
+            [d appendFormat:@"get_Player: %@\n", g_player_ok ? @"OK" : @"NULL"];
+            [d appendFormat:@"TryGetPosition: %@\n", g_pos_ok ? @"OK" : @"NULL"];
+            [d appendFormat:@"WorldToScreenPoint: %@\n", g_w2s_ok ? @"OK" : @"NULL"];
+            g_esp_diag = d;
+        }
         if (!cam) return;
+
+        g_pc_count = (int)g_cache->bounds.length;
+        g_cam_ok = 0; g_player_ok = 0; g_pos_ok = 0; g_w2s_ok = 0;
 
         NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:16];
         for (size_t i = 0; i < g_cache->bounds.length; i++) {
@@ -184,6 +200,7 @@ static BOOL project(Il2CppObject *cam, Vec3 w, CGPoint *out) {
             if (m_pc_is_death && bool_of(inv0(m_pc_is_death, pc))) continue;
 
             Il2CppObject *player = inv0(m_pc_get_player, pc);
+            if (player) g_player_ok = 1;
             if (!player) continue;
             if (m_player_alive && !bool_of(inv0(m_player_alive, player))) continue;
             if (m_player_team) {
@@ -197,8 +214,10 @@ static BOOL project(Il2CppObject *cam, Vec3 w, CGPoint *out) {
 
             Vec3 w;
             if (!player_world(pc, &w)) continue;
+            g_pos_ok = 1;
             CGPoint sp;
             if (!project(cam, w, &sp)) continue;
+            g_w2s_ok = 1;
             [rects addObject:[NSValue valueWithCGRect:CGRectMake(sp.x - 12, sp.y - 18, 24, 36)]];
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [g_layer setRects:rects]; });

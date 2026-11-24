@@ -7,6 +7,7 @@
 #import <objc/runtime.h>
 
 extern NSString *g_twin_probe_text;
+extern NSString *g_esp_diag;
 extern void twin_probe_run(void);
 #include <math.h>
 
@@ -116,20 +117,32 @@ static const CGFloat kPanelW = 260.f;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:card];
 
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsVerticalScrollIndicator = YES;
+    scroll.alwaysBounceVertical = YES;
+    [card addSubview:scroll];
+
     self.stack = [[UIStackView alloc] init];
     self.stack.axis = UILayoutConstraintAxisVertical;
     self.stack.spacing = 10;
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:self.stack];
+    [scroll addSubview:self.stack];
 
     [NSLayoutConstraint activateConstraints:@[
         [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
         [card.widthAnchor constraintEqualToConstant:kPanelW],
-        [self.stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
-        [self.stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [self.stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
-        [self.stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+        [scroll.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [scroll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [scroll.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [scroll.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+        [scroll.heightAnchor constraintLessThanOrEqualToConstant:520],
+        [self.stack.topAnchor constraintEqualToAnchor:scroll.topAnchor],
+        [self.stack.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
+        [self.stack.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor],
+        [self.stack.widthAnchor constraintEqualToAnchor:scroll.widthAnchor],
     ]];
 
     // header: title left, author line right
@@ -287,13 +300,10 @@ static const CGFloat kPanelW = 260.f;
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    // refresh diagnostics whenever the panel opens
-    twin_probe_run();
-    // diagnostics only make sense while a feature is armed
-    BOOL anyOn = twin_cfg_esp || twin_cfg_aim || twin_cfg_shield;
-    self.status.text = anyOn ? (g_twin_probe_text ?: @"") : @"";
-    self.status.hidden = !anyOn;
-    self.status.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    // show what the ESP chain actually resolved
+    self.status.text = g_esp_diag ?: @"esp: not running yet";
+    self.status.hidden = NO;
+    self.status.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
     self.status.numberOfLines = 0;
 }
 
