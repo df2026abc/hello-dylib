@@ -59,9 +59,34 @@ static Il2CppMethod *m_cam_main, *m_w2s;
 static Il2CppMethod *m_pm_get_tr, *m_tr_get_pos;
 static Il2CppMethod *m_find_all;
 static Il2CppArray *g_cache;
+static int32_t g_self_side;   // _side of the local player
+static BOOL g_have_self_side;
 static TwinEspLayer *g_layer;
 static BOOL g_ready;
 static CFAbsoluteTime g_lastScan;
+
+// _side offset is resolved at runtime; the metadata only gives us the name
+static int g_side_off = -2;
+static int side_offset(void) {
+    if (g_side_off != -2) return g_side_off;
+    g_side_off = -1;
+    if (!c_player_movement) return -1;
+    void *iter = NULL, *f = NULL;
+    while ((f = g_kit.class_get_fields(c_player_movement, &iter)) != NULL) {
+        const char *nm = g_kit.field_get_name(f);
+        if (nm && strcmp(nm, "_side") == 0) {
+            g_side_off = (int)g_kit.field_get_offset(f);
+            break;
+        }
+    }
+    return g_side_off;
+}
+
+static int32_t read_side(Il2CppObject *pm) {
+    int off = side_offset();
+    if (off < 0 || !pm) return INT32_MIN;
+    return *(int32_t *)((char *)pm + off);
+}
 
 static Il2CppArray *find_players(void) {
     if (!c_player_movement) return NULL;
@@ -77,6 +102,19 @@ static Il2CppArray *find_players(void) {
     if (!typeObj) return NULL;
     int32_t includeInactive = 0;
     void *args[2] = { typeObj, &includeInactive };
+    return (Il2CppArray *)kit_invoke(m_find_all, NULL, args);
+}
+
+// both component types are scanned; a player visible as either one gets a box
+static Il2CppArray *find_players2(void) {
+    static Il2CppClass *c_net;
+    if (!c_net) c_net = kit_find_class("PlayerNetwork");
+    if (!c_net || !m_find_all) return NULL;
+    Il2CppType *ty = g_kit.class_get_type(c_net);
+    Il2CppObject *typeObj = ty ? g_kit.type_get_object(ty) : NULL;
+    if (!typeObj) return NULL;
+    int32_t inc = 0;
+    void *args[2] = { typeObj, &inc };
     return (Il2CppArray *)kit_invoke(m_find_all, NULL, args);
 }
 
@@ -150,6 +188,20 @@ static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
         Il2CppObject *cam = kit_invoke(m_cam_main, NULL, NULL);
         if (!cam) return;
 
+        // re-latch the local side on every scene swap (round end, side switch);
+        // a stale value would paint teammates as enemies for the whole match
+        static uint64_t last_latch;
+        uint64_t now = (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+        if (g_cache && (!g_have_self_side || now - last_latch > 2000)) {
+            last_latch = now;
+            for (size_t i = 0; i < g_cache->bounds.length; i++) {
+                Il2CppObject *pm = kit_arr_at(g_cache, i);
+                if (!pm) continue;
+                int32_t sv = read_side(pm);
+                if (sv != INT32_MIN) { g_self_side = sv; g_have_self_side = YES; break; }
+            }
+        }
+
         // rescan the scene every 500 ms; per-frame enumeration is wasteful
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (!g_cache || now - g_lastScan > 0.5) {
@@ -157,15 +209,23 @@ static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
             g_lastScan = now;
         }
 
-        NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:16];
-        if (g_cache) {
-            for (size_t i = 0; i < g_cache->bounds.length; i++) {
-                Il2CppObject *pm = kit_arr_at(g_cache, i);
+        NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:32];
+        Il2CppArray *sets[2] = { g_cache, find_players2() };
+        for (int si = 0; si < 2; si++) {
+            Il2CppArray *arr = sets[si];
+            if (!arr) continue;
+            for (size_t i = 0; i < arr->bounds.length; i++) {
+                Il2CppObject *pm = kit_arr_at(arr, i);
                 if (!pm) continue;
                 Il2CppObject *tr = kit_invoke(m_pm_get_tr, pm, NULL);
                 if (!tr) continue;
                 Il2CppObject *posObj = kit_invoke(m_tr_get_pos, tr, NULL);
                 if (!posObj) continue;
+                // teammates share the local _side value and are not drawn
+                if (g_have_self_side) {
+                    int32_t side = read_side((Il2CppObject *)pm);
+                    if (side != INT32_MIN && side == g_self_side) continue;
+                }
                 Vec3 world = *(Vec3 *)((char *)posObj + 0x10);
                 CGPoint sp;
                 if (!project(cam, world, &sp)) continue;
