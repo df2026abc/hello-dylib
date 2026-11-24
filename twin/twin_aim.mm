@@ -16,6 +16,7 @@ typedef struct { float x, y, z, w; } Quat;
 static const float kDeg = 57.29578f;
 
 extern bool twin_cfg_aim;
+extern bool twin_cfg_aim_body;   // true = chest, false = head
 
 static float cfg_max_turn_deg = 42.f;
 static int   cfg_reaction_ms  = 180;
@@ -189,8 +190,8 @@ static void quat_to_yaw_pitch(Quat q, float *yaw, float *pitch) {
         Il2CppObject *tgtTr = kit_invoke(m_pm_get_tr, (Il2CppObject *)best, NULL);
         if (!tgtTr) return;
         Vec3 tp = transform_position(tgtTr);
-        // head offset: stand-in until a bone accessor is confirmed
-        tp.z += cfg_head_only ? 1.6f : 1.0f;
+        // vertical offset picks the lock point; refined once a bone accessor is confirmed
+        tp.z += twin_cfg_aim_body ? 1.0f : 1.6f;
 
         float dx = tp.x - eye.x, dy = tp.y - eye.y, dz = tp.z - eye.z;
         float wantYaw = atan2f(dx, dz) * kDeg;

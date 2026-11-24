@@ -12,6 +12,7 @@ bool  twin_cfg_aim    = true;
 bool  twin_cfg_esp    = true;
 bool  twin_cfg_shield = true;
 float twin_cfg_opacity = 0.38f;
+bool  twin_cfg_aim_body = false;   // false = lock head, true = lock body
 
 // author line — replace the text, keep the label
 static NSString *const kAuthorLine = @"cs2手游Pos绘制自瞄版-1.0";
@@ -93,7 +94,9 @@ static const CGFloat kPanelW = 260.f;
 #pragma mark - panel
 
 @interface TwinPanel : UIViewController
-@property (nonatomic, strong) UIStackView *stack;
+@property (nonatomic, strong) UIStackView *stack;      // header + tabs live here
+@property (nonatomic, strong) UIStackView *page1;      // 绘制
+@property (nonatomic, strong) UIStackView *page2;      // 自瞄
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UILabel *opacityValue;
 @end
@@ -145,15 +148,28 @@ static const CGFloat kPanelW = 260.f;
     [head addArrangedSubview:author];
     [self.stack addArrangedSubview:head];
 
-    [self addSwitch:@"自瞄" tag:1 on:twin_cfg_aim];
-    [self addSwitch:@"透视" tag:2 on:twin_cfg_esp];
+    // tab bar: 绘制 | 自瞄
+    UISegmentedControl *tabs = [[UISegmentedControl alloc] initWithItems:@[@"绘制", @"自瞄"]];
+    tabs.selectedSegmentIndex = 0;
+    tabs.selectedSegmentTintColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+    [tabs addTarget:self action:@selector(tabChanged:) forControlEvents:UIControlEventValueChanged];
+    tabs.translatesAutoresizingMaskIntoConstraints = NO;
+    [tabs.heightAnchor constraintEqualToConstant:30].active = YES;
+    [self.stack addArrangedSubview:tabs];
 
-    // opacity slider, green track when low alpha keeps boxes faint
+    // page 1: drawing
+    self.page1 = [[UIStackView alloc] init];
+    self.page1.axis = UILayoutConstraintAxisVertical;
+    self.page1.spacing = 10;
+    [self.stack addArrangedSubview:self.page1];
+
+    [self addSwitch:@"透视" tag:2 on:twin_cfg_esp to:self.page1];
+
     self.opacityValue = [UILabel new];
     self.opacityValue.textColor = UIColor.whiteColor;
     self.opacityValue.font = [UIFont systemFontOfSize:12];
     self.opacityValue.text = [NSString stringWithFormat:@"透明度 %.0f%%", twin_cfg_opacity * 100];
-    [self.stack addArrangedSubview:self.opacityValue];
+    [self.page1 addArrangedSubview:self.opacityValue];
 
     UISlider *sl = [[UISlider alloc] init];
     sl.minimumValue = 0.05f;
@@ -161,9 +177,20 @@ static const CGFloat kPanelW = 260.f;
     sl.value = twin_cfg_opacity;
     sl.tintColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
     [sl addTarget:self action:@selector(opacityChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:sl];
+    [self.page1 addArrangedSubview:sl];
 
-    [self addSwitch:@"检测屏蔽" tag:3 on:twin_cfg_shield];
+    // page 2: aim
+    self.page2 = [[UIStackView alloc] init];
+    self.page2.axis = UILayoutConstraintAxisVertical;
+    self.page2.spacing = 10;
+    self.page2.hidden = YES;
+    [self.stack addArrangedSubview:self.page2];
+
+    [self addSwitch:@"自瞄" tag:1 on:twin_cfg_aim to:self.page2];
+    [self addSegmentedTo:self.page2];
+
+    // shared footer
+    [self addSwitch:@"检测屏蔽" tag:3 on:twin_cfg_shield to:self.stack];
     [self addButton:@"清除设备封禁" color:[UIColor systemOrangeColor] action:@selector(doUnban)];
     [self addButton:@"关闭" color:UIColor.darkGrayColor action:@selector(doClose)];
 
@@ -175,7 +202,7 @@ static const CGFloat kPanelW = 260.f;
     [self.stack addArrangedSubview:self.status];
 }
 
-- (void)addSwitch:(NSString *)label tag:(NSInteger)tag on:(bool)on {
+- (void)addSwitch:(NSString *)label tag:(NSInteger)tag on:(bool)on to:(UIStackView *)stack {
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *l = [UILabel new];
@@ -198,7 +225,27 @@ static const CGFloat kPanelW = 260.f;
         [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [row.heightAnchor constraintEqualToConstant:32],
     ]];
-    [self.stack addArrangedSubview:row];
+    [stack addArrangedSubview:row];
+}
+
+- (void)addSegmentedTo:(UIStackView *)stack {
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"锁头", @"锁身"]];
+    seg.selectedSegmentIndex = twin_cfg_aim_body ? 1 : 0;
+    seg.selectedSegmentTintColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+    [seg addTarget:self action:@selector(aimPartChanged:) forControlEvents:UIControlEventValueChanged];
+    seg.translatesAutoresizingMaskIntoConstraints = NO;
+    [seg.heightAnchor constraintEqualToConstant:32].active = YES;
+    [stack addArrangedSubview:seg];
+}
+
+- (void)tabChanged:(UISegmentedControl *)seg {
+    BOOL draw = (seg.selectedSegmentIndex == 0);
+    self.page1.hidden = !draw;
+    self.page2.hidden = draw;
+}
+
+- (void)aimPartChanged:(UISegmentedControl *)seg {
+    twin_cfg_aim_body = (seg.selectedSegmentIndex == 1);
 }
 
 - (void)addButton:(NSString *)title color:(UIColor *)color action:(SEL)sel {
