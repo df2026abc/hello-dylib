@@ -243,7 +243,7 @@ static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
 
 __attribute__((constructor))
 static void twin_esp_boot(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         kit_resolve();
         [TwinEspDriver start];
     });
