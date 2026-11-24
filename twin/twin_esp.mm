@@ -6,6 +6,8 @@
 
 typedef struct { float x, y, z; } Vec3;
 
+extern bool twin_cfg_esp;
+
 #pragma mark - layer
 
 @interface TwinEspLayer : UIView
@@ -125,6 +127,7 @@ static BOOL point_to_screen(Il2CppObject *cam, Vec3 world, CGPoint *out) {
 
 - (void)step:(CADisplayLink *)link {
     @autoreleasepool {
+        if (!twin_cfg_esp) { [g_layer setRects:@[]]; return; }
         if (!g_domain) { if (!kit_resolve()) return; }
         if (!g_ready && !esp_bind()) return;
         Il2CppObject *cam = kit_invoke(m_main, NULL, NULL);

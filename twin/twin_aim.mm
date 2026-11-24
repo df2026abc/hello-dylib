@@ -7,6 +7,8 @@
 
 typedef struct { float x, y, z; } Vec3;
 
+extern bool twin_cfg_aim;
+
 static const float kDeg = 57.29578f;
 
 // --- tunables mirrored from the author's anti_ban.lua ---
@@ -157,6 +159,7 @@ static void fire_gate(Il2CppObject *player) {
 // one frame: pick, sleep, slew, maybe commit
 - (void)step:(CADisplayLink *)link {
     @autoreleasepool {
+        if (!twin_cfg_aim) { target = NULL; return; }
         if (!ready && !resolve_aim()) return;
         uint64_t t = now_ms();
         Il2CppClass *oc = kit_find_class("Object");
