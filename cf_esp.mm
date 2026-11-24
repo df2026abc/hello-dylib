@@ -157,6 +157,10 @@ static BOOL world_to_screen(void *camera, V3 world, V3 *out) {
     }
     return self;
 }
+// 命中测试返回 nil：触摸事件全部穿透给下层（游戏）
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    return nil;
+}
 - (void)drawRect:(CGRect)rect {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
@@ -169,10 +173,34 @@ static BOOL world_to_screen(void *camera, V3 world, V3 *out) {
 }
 @end
 
-static CfEspView *g_view = nil;
-static UIWindow  *g_win  = nil;
+// 承载绘制层的窗口：不抢 key window，触摸全透传
+@interface CfOverlayWindow : UIWindow
+@end
+@implementation CfOverlayWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    return nil;
+}
+@end
+
+// CADisplayLink 驱动
+@interface CfDriver : NSObject
+- (void)onTick:(CADisplayLink *)link;
+@end
+
+static CfEspView  *g_view = nil;
+static UIWindow   *g_win  = nil;
+static CADisplayLink *g_link = nil;
+static CfDriver    *g_driver = nil;
 static CGFloat g_sw = 0, g_sh = 0;
 static int g_frameCount = 0;
+
+static void draw_once(void);
+
+@implementation CfDriver
+- (void)onTick:(CADisplayLink *)link {
+    @autoreleasepool { draw_once(); }
+}
+@end
 
 // 取当前活动的 UIWindowScene -> keyWindow
 static UIWindow *find_active_window(void) {
@@ -202,6 +230,7 @@ static UIWindow *find_active_window(void) {
 static void draw_once(void) {
     if (!g_view) return;
     g_frameCount++;
+    if (g_frameCount == 1) w("draw_once 第一次进入\n");
 
     void *m = f_method(cls_obj, "FindObjectsOfType", 1);
     if (!m) { if (g_frameCount==1) w("no FindObjectsOfType\n"); return; }
@@ -304,11 +333,11 @@ static void attach_panel(void) {
     hint.font = [UIFont systemFontOfSize:10];
     [win.rootViewController.view addSubview:hint];
 
-    [win makeKeyAndVisible];
+    // 悬浮窗也要能接收触摸，所以只对这块区域开命中，其余穿透
+    win.hidden = NO;
     g_panel = win;
     w("悬浮窗已挂载\n");
 }
-
 // ============================================================
 // 启动
 // ============================================================
@@ -330,36 +359,33 @@ static void boot(void) {
         g_sh = host.bounds.size.height;
         w("host window %.0fx%.0f\n", g_sw, g_sh);
 
-        // 独立窗口承载绘制层，盖在 Unity 之上
+        // 独立窗口承载绘制层，盖在 Unity 之上，但不抢 key window
         UIWindowScene *ws = host.windowScene;
-        g_win = ws ? [[UIWindow alloc] initWithWindowScene:ws]
-                   : [[UIWindow alloc] initWithFrame:host.bounds];
+        g_win = ws ? [[CfOverlayWindow alloc] initWithWindowScene:ws]
+                   : [[CfOverlayWindow alloc] initWithFrame:host.bounds];
         g_win.frame = host.bounds;
         g_win.windowLevel = UIWindowLevelAlert + 900;
         g_win.backgroundColor = [UIColor clearColor];
-        g_win.hidden = NO;
         g_win.rootViewController = [[UIViewController alloc] init];
         g_win.rootViewController.view.backgroundColor = [UIColor clearColor];
+        g_win.rootViewController.view.userInteractionEnabled = NO;
 
         g_view = [[CfEspView alloc] initWithFrame:g_win.bounds];
         g_view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [g_win.rootViewController.view addSubview:g_view];
 
-        [g_win makeKeyAndVisible];
+        // 关键：hidden = NO 就够，不调 makeKeyAndVisible，否则会抢走游戏触摸
+        g_win.hidden = NO;
         w("绘制窗口已挂载\n");
 
         attach_panel();
 
-        // 主线程定时器
-        dispatch_source_t timer = dispatch_source_create(
-            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW,
-                                  33 * NSEC_PER_MSEC, 8 * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(timer, ^{
-            @autoreleasepool { draw_once(); }
-        });
-        dispatch_resume(timer);
-        w("定时器已启动\n");
+        // CADisplayLink 驱动，跟游戏帧循环同一个 runloop
+        g_driver = [[CfDriver alloc] init];
+        g_link = [CADisplayLink displayLinkWithTarget:g_driver
+                                             selector:@selector(onTick:)];
+        [g_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        w("显示链接已启动 %p\n", g_link);
     });
 }
 
