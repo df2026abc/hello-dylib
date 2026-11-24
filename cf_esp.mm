@@ -1,30 +1,35 @@
-// cf_esp.mm — CounterFlame 探测版 v3
+// cf_esp.mm — CounterFlame (CS2手游) 透视方框 + 悬浮窗
 //
-// 目的：搞清 5 个 PlayerController 分别是谁、坐标从哪读才准
-// 重点：_selfRoot → Transform.position，以及 _currSimPosition 对比
+// 坐标实测确认：
+//   PlayerController._movementController = 0x40
+//   PlayerController._mainCamera         = 0x30
+//   PlayerController._isDeath            = 0xa8
+//   PlayerController._view               = 0x80
+//   PlayerMovement._currSimPosition      = 0x268  (与 _selfRoot.position 一致)
+//   PlayerSkeleton._headBone             = 0xc0
+//   PlayerSkeleton._chestBone            = 0xc8
 //
 // 编译：
 //   clang++ -arch arm64 -dynamiclib -fobjc-arc -std=c++17 \
 //     -framework Foundation -framework UIKit -framework QuartzCore \
 //     -install_name @executable_path/cf_esp.dylib \
 //     cf_esp.mm -o cf_esp.dylib
-//
-// 输出：App沙盒 Documents/cf_esp.txt
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <dlfcn.h>
+#include <math.h>
+#include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <string.h>
 
+// ============================================================
+// il2cpp
+// ============================================================
 typedef struct Il2CppArray {
-    void *klass;
-    void *monitor;
-    void *bounds;
-    size_t max_length;
-    void *vector[1];
+    void *klass; void *monitor; void *bounds;
+    size_t max_length; void *vector[1];
 } Il2CppArray;
 
 typedef void*  (*p_domain_get)(void);
@@ -37,9 +42,6 @@ typedef const char* (*p_class_get_namespace)(void*);
 typedef void*  (*p_class_get_method_from_name)(void*, const char*, int);
 typedef void*  (*p_runtime_invoke)(void*, void*, void**, void**);
 typedef void*  (*p_thread_attach)(void*);
-typedef size_t (*p_field_get_offset)(void*);
-typedef void*  (*p_class_get_fields)(void*, void**);
-typedef const char* (*p_field_get_name)(void*);
 typedef void*  (*p_object_unbox)(void*);
 typedef void*  (*p_class_get_type)(void*);
 typedef void*  (*p_type_get_object)(void*);
@@ -49,9 +51,8 @@ static p_assembly_get_image f_img; static p_image_get_class_count f_cnt;
 static p_image_get_class f_cls; static p_class_get_name f_cname;
 static p_class_get_namespace f_ns; static p_class_get_method_from_name f_method;
 static p_runtime_invoke f_invoke; static p_thread_attach f_attach;
-static p_field_get_offset f_foff; static p_class_get_fields f_fields;
-static p_field_get_name f_fname; static p_object_unbox f_unbox;
-static p_class_get_type f_get_type; static p_type_get_object f_type_obj;
+static p_object_unbox f_unbox; static p_class_get_type f_get_type;
+static p_type_get_object f_type_obj;
 
 static void *sym(const char *n) {
     void *p = dlsym(RTLD_DEFAULT, n);
@@ -69,17 +70,17 @@ static BOOL resolve(void) {
     f_method=(p_class_get_method_from_name)sym("il2cpp_class_get_method_from_name");
     f_invoke=(p_runtime_invoke)sym("il2cpp_runtime_invoke");
     f_attach=(p_thread_attach)sym("il2cpp_thread_attach");
-    f_foff=(p_field_get_offset)sym("il2cpp_field_get_offset");
-    f_fields=(p_class_get_fields)sym("il2cpp_class_get_fields");
-    f_fname=(p_field_get_name)sym("il2cpp_field_get_name");
     f_unbox=(p_object_unbox)sym("il2cpp_object_unbox");
     f_get_type=(p_class_get_type)sym("il2cpp_class_get_type");
     f_type_obj=(p_type_get_object)sym("il2cpp_type_get_object");
     return f_domain && f_asm && f_img && f_cnt && f_cls && f_cname &&
-           f_method && f_invoke && f_attach && f_foff && f_fields &&
-           f_fname && f_unbox && f_get_type && f_type_obj;
+           f_method && f_invoke && f_attach && f_unbox &&
+           f_get_type && f_type_obj;
 }
 
+// ============================================================
+// 日志
+// ============================================================
 static FILE *g_fp = NULL;
 static void w(const char *fmt, ...) {
     if (!g_fp) return;
@@ -87,9 +88,15 @@ static void w(const char *fmt, ...) {
     vfprintf(g_fp, fmt, ap); va_end(ap); fflush(g_fp);
 }
 
+// ============================================================
+// 类
+// ============================================================
+static void *cls_pc = NULL, *cls_cam = NULL, *cls_obj = NULL, *cls_tf = NULL;
+
 static void *find_class(const char *ns, const char *name) {
     void *dom = f_domain(); size_t n = 0;
     void **asms = f_asm(dom, &n);
+    if (!asms) return NULL;
     for (size_t i = 0; i < n; i++) {
         if (!asms[i]) continue;
         void *img = f_img(asms[i]); if (!img) continue;
@@ -115,7 +122,7 @@ static void *make_type(void *klass) {
     return f_type_obj(t);
 }
 
-static Il2CppArray *find_objects(void *klass, void *cls_obj) {
+static Il2CppArray *find_objects(void *klass) {
     if (!klass || !cls_obj) return NULL;
     void *m = f_method(cls_obj, "FindObjectsOfType", 1);
     if (!m) return NULL;
@@ -127,102 +134,238 @@ static Il2CppArray *find_objects(void *klass, void *cls_obj) {
     return (Il2CppArray *)ret;
 }
 
+// ============================================================
+// 内存读取（全带判空）
+// ============================================================
 typedef struct { float x, y, z; } V3;
+
+static void *rdp(void *o, size_t off) {
+    if (!o) return NULL;
+    return *(void**)((uint8_t*)o + off);
+}
 static V3 rd3(void *o, size_t off) {
     V3 v = {0,0,0};
     if (!o) return v;
     memcpy(&v, (uint8_t*)o + off, 12);
     return v;
 }
-static void *rdp(void *o, size_t off) {
-    if (!o) return NULL;
-    return *(void**)((uint8_t*)o + off);
-}
 
-// Transform.position：先拿 Transform 组件，再调 get_position
-static V3 get_transform_pos(void *cls_tf, void *transform) {
-    V3 v = {0,0,0};
-    if (!transform || !cls_tf) return v;
+// Transform.position
+static BOOL transform_pos(void *transform, V3 *out) {
+    if (!transform || !cls_tf) return NO;
     void *m = f_method(cls_tf, "get_position", 0);
-    if (!m) return v;
+    if (!m) return NO;
     void *exc = NULL;
     void *ret = f_invoke(m, transform, NULL, &exc);
-    if (exc || !ret) return v;
+    if (exc || !ret) return NO;
     V3 *p = (V3*)f_unbox(ret);
-    if (p) v = *p;
-    return v;
+    if (!p) return NO;
+    *out = *p;
+    return YES;
 }
 
-// 从 GameObject 拿 Transform：get_transform
-static void *get_transform(void *cls_go, void *go) {
-    if (!go || !cls_go) return NULL;
-    void *m = f_method(cls_go, "get_transform", 0);
-    if (!m) return NULL;
+// Camera.WorldToScreenPoint(Vector3) -> Vector3
+static BOOL world_to_screen(void *camera, V3 world, V3 *out) {
+    if (!camera || !cls_cam) return NO;
+    void *m = f_method(cls_cam, "WorldToScreenPoint", 1);
+    if (!m) return NO;
+
+    // Vector3 按值传：用一块对齐的临时内存 + runtime_invoke
+    union { V3 v; uint8_t raw[32]; } arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.v = world;
+
+    void *params[1] = { &arg };
     void *exc = NULL;
-    void *ret = f_invoke(m, go, NULL, &exc);
-    if (exc) return NULL;
-    return ret;
+    void *ret = f_invoke(m, camera, params, &exc);
+    if (exc || !ret) return NO;
+
+    V3 *p = (V3*)f_unbox(ret);
+    if (!p) return NO;
+    *out = *p;
+    return YES;
 }
 
-static void probe(void) {
-    w("\n===== PROBE v3 =====\n");
+// ============================================================
+// 配置
+// ============================================================
+static BOOL  g_on = YES;
+static float g_boxW = 0.45f;   // 框宽 = 框高 * 这个比例
+static float g_headOff = 0.75f; // 头顶偏移（抬多高）
 
-    void *cls_pc  = find_class(NULL, "PlayerController");
-    void *cls_sk  = find_class("ScarletWork.Game", "PlayerSkeleton");
-    void *cls_obj = find_class("UnityEngine", "Object");
-    void *cls_go  = find_class("UnityEngine", "GameObject");
-    void *cls_tf  = find_class("UnityEngine", "Transform");
+// ============================================================
+// 绘制视图
+// ============================================================
+@interface CfEspView : UIView
+@property (nonatomic, strong) NSMutableArray<NSValue *> *rects;
+@end
 
-    w("cls_pc=%p cls_sk=%p cls_obj=%p cls_go=%p cls_tf=%p\n",
-      cls_pc, cls_sk, cls_obj, cls_go, cls_tf);
+@implementation CfEspView
+- (instancetype)initWithFrame:(CGRect)f {
+    self = [super initWithFrame:f];
+    if (self) {
+        self.backgroundColor = [UIColor clearColor];
+        self.userInteractionEnabled = NO;
+        _rects = [NSMutableArray array];
+    }
+    return self;
+}
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) return;
+    CGContextSetStrokeColorWithColor(ctx,
+        [UIColor colorWithRed:0.1 green:1.0 blue:0.3 alpha:0.9].CGColor);
+    CGContextSetLineWidth(ctx, 2.0);
+    for (NSValue *v in self.rects) {
+        CGRect r = [v CGRectValue];
+        CGContextStrokeRect(ctx, r);
+    }
+}
+@end
 
-    if (!cls_pc || !cls_obj) return;
+static CfEspView *g_view = nil;
 
-    Il2CppArray *arr = find_objects(cls_pc, cls_obj);
-    if (!arr) { w("拿不到实例\n"); return; }
+// ============================================================
+// 每帧：收集方框
+// ============================================================
+static void tick(void) {
+    if (!g_view) return;
+    if (!g_on) {
+        g_view.rects = [NSMutableArray array];
+        [g_view setNeedsDisplay];
+        return;
+    }
+
+    Il2CppArray *arr = find_objects(cls_pc);
+    if (!arr) return;
 
     size_t len = arr->max_length;
-    w("实例数: %zu\n", len);
+    NSMutableArray *rects = [NSMutableArray array];
+
+    // 屏幕尺寸
+    CGFloat sw = g_view.bounds.size.width;
+    CGFloat sh = g_view.bounds.size.height;
+    if (sw <= 0 || sh <= 0) return;
 
     for (size_t i = 0; i < len; i++) {
-        void *o = arr->vector[i];
-        if (!o) continue;
-        w("\n--- [%zu] obj=%p ---\n", i, o);
+        void *pc = arr->vector[i];
+        if (!pc) continue;
 
-        uint8_t *b = (uint8_t*)o;
-        void *mv   = rdp(o, 0x40);
-        void *view = rdp(o, 0x80);
-        void *pl   = rdp(o, 0x90);
-        uint8_t dead = b[0xa8];
-        w("  mv=%p view=%p player=%p dead=%d\n", mv, view, pl, dead);
+        // 死亡跳过
+        uint8_t dead = *(uint8_t*)((uint8_t*)pc + 0xa8);
+        if (dead) continue;
 
-        if (mv) {
-            V3 cur = rd3(mv, 0x268);
-            V3 root = rd3(mv, 0x188);
-            void *rootObj = rdp(mv, 0x188);
-            w("  _currSimPosition(0x268) = (%.2f, %.2f, %.2f)\n", cur.x, cur.y, cur.z);
-            w("  _selfRoot raw ptr(0x188) = %p\n", rootObj);
+        void *mv = rdp(pc, 0x40);
+        void *cam = rdp(pc, 0x30);
+        if (!mv || !cam) continue;
 
-            // _selfRoot 是 Transform，直接调 get_position
-            V3 tp = get_transform_pos(cls_tf, rootObj);
-            w("  _selfRoot.position     = (%.2f, %.2f, %.2f)\n", tp.x, tp.y, tp.z);
+        V3 pos = rd3(mv, 0x268);
+        if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
 
-            // 从 view 拿 GameObject，再拿 Transform
-            if (view && cls_go) {
-                void *tf2 = get_transform(cls_go, view);
-                w("  view->transform = %p\n", tf2);
-                V3 vp = get_transform_pos(cls_tf, tf2);
-                w("  view.position   = (%.2f, %.2f, %.2f)\n", vp.x, vp.y, vp.z);
-            }
-        }
+        // 头顶抬高一点
+        V3 head = { pos.x, pos.y + g_headOff, pos.z };
+        V3 foot = pos;
 
-        // skeleton 检查
-        if (cls_sk) {
-            void *sk = rdp(o, 0x78); // 不一定对，先看看
-            w("  offset0x78=%p\n", sk);
-        }
+        V3 sHead, sFoot;
+        if (!world_to_screen(cam, head, &sHead)) continue;
+        if (!world_to_screen(cam, foot, &sFoot)) continue;
+
+        // 屏幕外的跳过
+        if (sHead.z < 0 || sFoot.z < 0) continue;
+
+        // Unity 屏幕坐标原点在左下，UIKit 在左上，y 要翻
+        CGFloat yHead = sh - sHead.y;
+        CGFloat yFoot = sh - sFoot.y;
+
+        CGFloat h = fabs(yFoot - yHead);
+        if (h < 4 || h > sh) continue;
+        CGFloat wpx = h * g_boxW;
+
+        CGFloat cx = sHead.x;
+        CGRect r = CGRectMake(cx - wpx * 0.5f, yHead, wpx, h);
+        [rects addObject:[NSValue valueWithCGRect:r]];
     }
-    w("\n===== END =====\n");
+
+    g_view.rects = rects;
+    [g_view setNeedsDisplay];
+}
+
+// ============================================================
+// 悬浮窗
+// ============================================================
+static UIWindow *g_panel = nil;
+
+static void attach_panel(void) {
+    if (g_panel) return;
+    UIWindow *w = [[UIWindow alloc] initWithFrame:CGRectMake(40, 100, 200, 90)];
+    w.windowLevel = UIWindowLevelAlert + 100;
+    w.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
+    w.layer.cornerRadius = 10;
+    w.layer.masksToBounds = YES;
+    w.hidden = NO;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, 120, 22)];
+    title.text = @"CF ESP";
+    title.textColor = [UIColor colorWithRed:0.2 green:1 blue:0.4 alpha:1];
+    title.font = [UIFont boldSystemFontOfSize:15];
+    [w addSubview:title];
+
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(130, 6, 51, 31)];
+    sw.on = YES;
+    [sw addTarget:nil action:nil forControlEvents:UIControlEventValueChanged];
+    [w addSubview:sw];
+
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(12, 40, 170, 18)];
+    hint.text = @"开/关方框";
+    hint.textColor = [UIColor lightGrayColor];
+    hint.font = [UIFont systemFontOfSize:11];
+    [w addSubview:hint];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] init];
+    [w addGestureRecognizer:pan];
+
+    g_panel = w;
+    [w makeKeyAndVisible];
+}
+
+// ============================================================
+// 启动
+// ============================================================
+static void boot(void) {
+    if (!resolve()) { w("resolve fail\n"); return; }
+    f_attach(f_domain());
+
+    cls_pc  = find_class(NULL, "PlayerController");
+    cls_cam = find_class("UnityEngine", "Camera");
+    cls_obj = find_class("UnityEngine", "Object");
+    cls_tf  = find_class("UnityEngine", "Transform");
+
+    w("classes: pc=%p cam=%p obj=%p tf=%p\n", cls_pc, cls_cam, cls_obj, cls_tf);
+    if (!cls_pc || !cls_cam || !cls_obj || !cls_tf) { w("类缺失\n"); return; }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = nil;
+        for (UIWindow *x in [UIApplication sharedApplication].windows) {
+            if (x.isKeyWindow) { win = x; break; }
+        }
+        if (!win) win = [UIApplication sharedApplication].windows.firstObject;
+        if (!win) { w("没有 window\n"); return; }
+
+        g_view = [[CfEspView alloc] initWithFrame:win.bounds];
+        g_view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [win addSubview:g_view];
+        [win bringSubviewToFront:g_view];
+        w("视图已挂载 %.0fx%.0f\n", win.bounds.size.width, win.bounds.size.height);
+    });
+
+    // 每帧刷新
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0));
+    dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC, 4 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        @autoreleasepool { tick(); }
+    });
+    dispatch_resume(timer);
 }
 
 __attribute__((constructor))
@@ -232,12 +375,8 @@ static void init(void) {
     g_fp = fopen(p.UTF8String, "w");
     w("dylib loaded\n");
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-        @autoreleasepool {
-            if (!resolve()) { w("resolve FAIL\n"); return; }
-            f_attach(f_domain());
-            probe();
-        }
+        @autoreleasepool { boot(); }
     });
 }

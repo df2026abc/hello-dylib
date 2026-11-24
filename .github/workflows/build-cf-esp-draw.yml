@@ -1,0 +1,32 @@
+name: build-cf-esp-draw
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm xz-utils
+      - name: iOS SDK
+        run: |
+          mkdir -p "$HOME/sdk" && cd "$HOME/sdk"
+          curl -L --fail -o sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz
+          tar -xJf sdk.tar.xz
+      - name: Build
+        run: |
+          SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
+          clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
+            -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
+            -Wl,-undefined,dynamic_lookup \
+            -Wl,-install_name,@executable_path/cf_esp.dylib \
+            -framework Foundation -framework UIKit -framework QuartzCore \
+            cf_esp.mm -o cf_esp.dylib
+          ls -lh cf_esp.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cf_esp_draw
+          path: cf_esp.dylib
+          if-no-files-found: error
