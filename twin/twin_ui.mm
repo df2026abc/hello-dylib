@@ -13,7 +13,7 @@ bool  twin_cfg_shield = true;
 float twin_cfg_opacity = 0.38f;
 
 // author line — replace the text, keep the label
-static NSString *const kAuthorLine = @"作者：@hualuo88";
+static NSString *const kAuthorLine = @"cs2手游Pos绘制自瞄版-1.0";
 
 BOOL twin_backup_save(void);
 BOOL twin_backup_restore(void);
@@ -93,7 +93,10 @@ static const CGFloat kPanelW = 260.f;
     UILabel *author = [UILabel new];
     author.text = kAuthorLine;
     author.textColor = UIColor.lightGrayColor;
-    author.font = [UIFont systemFontOfSize:11];
+    author.font = [UIFont systemFontOfSize:9];
+    author.adjustsFontSizeToFitWidth = YES;
+    author.minimumScaleFactor = 0.7;
+    [author setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     author.textAlignment = NSTextAlignmentRight;
     [head addArrangedSubview:title];
     [head addArrangedSubview:author];
