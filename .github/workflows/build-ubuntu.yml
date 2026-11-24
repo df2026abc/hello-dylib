@@ -42,7 +42,7 @@ jobs:
             -o twin.dylib \
             twin/il2cpp_kit.mm twin/twin_esp.mm twin/twin_aim.mm \
             twin/twin_backup.mm twin/twin_unban.mm twin/twin_shield.mm \
-            twin/twin_ui.mm twin/bypass.mm
+            twin/twin_ui.mm twin/bypass.mm twin/twin_probe.mm
           ls -l twin.dylib
           file twin.dylib || true
 
