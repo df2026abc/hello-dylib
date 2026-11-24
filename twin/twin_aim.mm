@@ -1,28 +1,128 @@
 // language: Objective-C++, file: twin/twin_aim.mm, target: iOS 15+, arm64
-// *aim is a state machine: find, sleep on reaction, slew, fire on the tail of the slew*
+// Aimbot driven by the game's real classes (names read from global-metadata.dat):
+//   PlayerMovement  -> per-player transform, position
+//   Camera          -> Camera.main, WorldToScreenPoint
+//   Transform       -> get_position / get_rotation / set_rotation
+// Lock: head bone when reachable, chest fallback. Humanisation mirrors the
+// author's anti_ban.lua (42 deg/s slew, 180 ms reaction, 0.35 deg jitter).
 #import "il2cpp_kit.h"
 #import <UIKit/UIKit.h>
 #import <math.h>
 #include <stdint.h>
 
 typedef struct { float x, y, z; } Vec3;
-
-extern bool twin_cfg_aim;
+typedef struct { float x, y, z, w; } Quat;
 
 static const float kDeg = 57.29578f;
 
-// --- tunables mirrored from the author's anti_ban.lua ---
-static float  cfg_max_turn_deg = 42.f;
-static int    cfg_reaction_ms  = 180;
-static float  cfg_jitter_deg   = 0.35f;
-static float  cfg_fov_deg      = 8.f;
-static int    cfg_fire_delay   = 90;
-static int    cfg_switch_cd    = 800;
-static int    cfg_burst_min    = 1200;
-static int    cfg_burst_max    = 4200;
-static BOOL   cfg_head_only    = YES;
-static BOOL   cfg_nearest      = YES;
-static BOOL   cfg_continuous   = NO;
+extern bool twin_cfg_aim;
+
+static float cfg_max_turn_deg = 42.f;
+static int   cfg_reaction_ms  = 180;
+static float cfg_jitter_deg   = 0.35f;
+static int   cfg_fire_delay   = 90;
+static int   cfg_switch_cd    = 800;
+static BOOL  cfg_head_only    = YES;
+
+static Il2CppClass *c_camera, *c_player_movement, *c_transform;
+static Il2CppMethod *m_cam_main, *m_w2s;
+static Il2CppMethod *m_pm_get_tr, *m_tr_get_pos, *m_tr_get_rot, *m_tr_set_rot;
+static Il2CppMethod *m_find_all;
+
+static uint64_t t_start, t_pending_at, t_last_switch, t_pause_until;
+static double phase;
+static void *target;
+static BOOL ready;
+
+static uint64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t t = (uint64_t)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
+    if (!t_start) t_start = t;
+    return t - t_start;
+}
+static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
+static float norm180(float a) { return fmodf(a + 540.f, 360.f) - 180.f; }
+static double rand01(void) { return (double)arc4random() / 4294967296.0; }
+
+static float humanize(float delta, float dt) {
+    float rate = cfg_max_turn_deg * dt;
+    float step = clampf(delta, -rate, rate);
+    phase += dt * (7.3 + rand01() * 2.1);
+    return step + (float)sin(phase) * cfg_jitter_deg;
+}
+
+static BOOL aim_bind(void) {
+    if (!g_domain) return NO;
+    if (!c_camera) c_camera = kit_find_class("Camera");
+    if (!c_player_movement) c_player_movement = kit_find_class("PlayerMovement");
+    if (!c_transform) c_transform = kit_find_class("Transform");
+    if (!c_camera || !c_player_movement || !c_transform) return NO;
+
+    m_cam_main = kit_method(c_camera, "get_main", 0);
+    m_w2s = kit_method(c_camera, "WorldToScreenPoint", 1);
+    m_pm_get_tr = kit_method(c_player_movement, "get_transform", 0);
+    m_tr_get_pos = kit_method(c_transform, "get_position", 0);
+    m_tr_get_rot = kit_method(c_transform, "get_rotation", 0);
+    m_tr_set_rot = kit_method(c_transform, "set_rotation", 1);
+
+    Il2CppClass *oc = kit_find_class("Object");
+    if (oc && !m_find_all)
+        for (int a = 1; a <= 2 && !m_find_all; a++)
+            m_find_all = g_kit.class_get_method_from_name(oc, "FindObjectsOfType", a);
+
+    ready = (m_cam_main && m_w2s && m_pm_get_tr && m_tr_get_pos && m_tr_get_rot && m_tr_set_rot && m_find_all);
+    return ready;
+}
+
+static Il2CppObject *camera_object(void) {
+    return m_cam_main ? kit_invoke(m_cam_main, NULL, NULL) : NULL;
+}
+
+static Il2CppObject *camera_transform(Il2CppObject *cam) {
+    if (!cam) return NULL;
+    Il2CppMethod *gt = kit_method(c_camera, "get_transform", 0);
+    return gt ? kit_invoke(gt, cam, NULL) : NULL;
+}
+
+static Vec3 transform_position(Il2CppObject *tr) {
+    Il2CppObject *p = tr ? kit_invoke(m_tr_get_pos, tr, NULL) : NULL;
+    return p ? *(Vec3 *)((char *)p + 0x10) : (Vec3){0, 0, 0};
+}
+
+static Quat transform_rotation(Il2CppObject *tr) {
+    Il2CppObject *q = tr ? kit_invoke(m_tr_get_rot, tr, NULL) : NULL;
+    return q ? *(Quat *)((char *)q + 0x10) : (Quat){0, 0, 0, 1};
+}
+
+static void set_transform_rotation(Il2CppObject *tr, Quat q) {
+    if (!tr || !m_tr_set_rot) return;
+    void *args[1] = { &q };
+    kit_invoke(m_tr_set_rot, tr, args);
+}
+
+// yaw/pitch -> quaternion (Unity order: yaw about Y, pitch about X)
+static Quat quat_from_yaw_pitch(float yaw_deg, float pitch_deg) {
+    float hy = yaw_deg * 0.5f / kDeg, hp = pitch_deg * 0.5f / kDeg;
+    float sy = sinf(hy), cy = cosf(hy), sp = sinf(hp), cp = cosf(hp);
+    Quat q;
+    q.x = cy * sp;
+    q.y = sy * cp;
+    q.z = -sy * sp;
+    q.w = cy * cp;
+    return q;
+}
+
+static float aim_yaw, aim_pitch;
+
+static void quat_to_yaw_pitch(Quat q, float *yaw, float *pitch) {
+    // Unity forward = R * (0,0,1)
+    float fx = 2.f * (q.x * q.z + q.w * q.y);
+    float fy = 2.f * (q.y * q.z - q.w * q.x);
+    float fz = 1.f - 2.f * (q.x * q.x + q.y * q.y);
+    *yaw = atan2f(fx, fz) * kDeg;
+    *pitch = -asinf(clampf(fy, -1.f, 1.f)) * kDeg;
+}
 
 @interface TwinAim : NSObject
 + (instancetype)shared;
@@ -30,185 +130,90 @@ static BOOL   cfg_continuous   = NO;
 - (void)step:(CADisplayLink *)link;
 @end
 
-// --- managed handles, resolved lazily ---
-static Il2CppClass *c_camera, *c_player, *c_transform, *c_weapon;
-static Il2CppMethod *m_cam_main, *m_w2s, *m_get_tf, *m_get_pos;
-static Il2CppMethod *m_get_bone, *m_bone_name;
-static Il2CppMethod *m_fire, *m_fire_prep_on, *m_fire_prep_off;
-static Il2CppMethod *m_get_head;
-static Il2CppMethod *m_find_players;
-
-// --- runtime state ---
-static uint64_t t_start_ms, t_pending_at, t_last_switch, t_fire_until, t_pause_until;
-static uint64_t t_last_fire;
-static double   phase;
-static void    *target;        // last locked managed object pointer
-static float    last_yaw, last_pitch;
-static BOOL     ready;
-
-static uint64_t now_ms(void) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t t = (uint64_t)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
-    if (!t_start_ms) t_start_ms = t;
-    return t - t_start_ms;
-}
-
-static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
-static float norm180(float a) { return fmodf(a + 540.f, 360.f) - 180.f; }
-
-static double rand01(void) { return (double)arc4random() / 4294967296.0; }
-
-// first-order slew + sine wobble: not a snap, not a straight line
-static float humanize(float delta, float dt) {
-    float rate = cfg_max_turn_deg * dt;
-    float step = clampf(delta, -rate, rate);
-    phase += dt * (7.3 + rand01() * 2.1);
-    return step + (float)sin(phase) * cfg_jitter_deg * dt * kDeg / kDeg;
-}
-
-static BOOL resolve_aim(void) {
-    if (!g_domain) return NO;
-    if (!c_camera) c_camera = kit_find_class("Camera");
-    if (!c_player) c_player = kit_find_class("Player");
-    if (!c_transform) c_transform = kit_find_class("Transform");
-    if (!c_player || !c_camera) return NO;
-    if (!m_cam_main) m_cam_main = kit_method(c_camera, "get_main", 0);
-    if (!m_w2s) m_w2s = kit_method(c_camera, "WorldToScreenPoint", 1);
-    if (!m_get_tf) m_get_tf = kit_method(c_player, "get_transform", 0);
-    if (!m_get_bone) m_get_bone = kit_method(c_player, "GetBoneTransform", 1);
-    if (!m_get_pos) m_get_pos = kit_method(c_transform, "get_position", 0);
-    if (!m_find_players) {
-        Il2CppClass *oc = kit_find_class("Object");
-        if (oc) for (int a = 1; a <= 2 && !m_find_players; a++)
-            m_find_players = g_kit.class_get_method_from_name(oc, "FindObjectsOfType", a);
-    }
-    ready = (m_cam_main && m_w2s && m_get_tf && m_get_pos);
-    return ready;
-}
-
-static Vec3 cam_position(void) {
-    Il2CppObject *cam = kit_invoke(m_cam_main, NULL, NULL);
-    if (!cam) return (Vec3){0,0,0};
-    Il2CppMethod *gt = kit_method(c_camera, "get_transform", 0);
-    Il2CppObject *tf = gt ? kit_invoke(gt, cam, NULL) : NULL;
-    Il2CppObject *posObj = tf ? kit_invoke(m_get_pos, tf, NULL) : NULL;
-    return posObj ? *(Vec3 *)((char *)posObj + 0x10) : (Vec3){0,0,0};
-}
-
-// bone index from HumanBodyBones; head = 10, spine/chest = 8
-#define BONE_HEAD  10
-#define BONE_CHEST  8
-
-static Vec3 bone_world(Il2CppObject *player, int bone) {
-    if (m_get_bone) {
-        int32_t b = bone;
-        void *args[1] = { &b };
-        Il2CppObject *tf = kit_invoke(m_get_bone, player, args);
-        if (tf) {
-            Il2CppObject *p = kit_invoke(m_get_pos, tf, NULL);
-            if (p) return *(Vec3 *)((char *)p + 0x10);
-        }
-    }
-    Il2CppObject *tf = kit_invoke(m_get_tf, player, NULL);
-    Il2CppObject *p = tf ? kit_invoke(m_get_pos, tf, NULL) : NULL;
-    return p ? *(Vec3 *)((char *)p + 0x10) : (Vec3){0,0,0};
-}
-
-// nearest-or-first selection inside the FOV cone
-static void *pick_target(Il2CppArray *players, Vec3 eye, float *out_dist) {
-    if (!players) return NULL;
-    void *best = NULL; float best_d = 1e9f;
-    for (size_t i = 0; i < players->bounds.length; i++) {
-        void *p = kit_arr_at(players, i);
-        if (!p) continue;
-        Vec3 head = bone_world((Il2CppObject *)p, cfg_head_only ? BONE_HEAD : BONE_CHEST);
-        float dx = head.x - eye.x, dy = head.y - eye.y, dz = head.z - eye.z;
-        float d2 = dx*dx + dy*dy + dz*dz;
-        if (!best || (cfg_nearest && d2 < best_d)) { best = p; best_d = d2; }
-    }
-    *out_dist = sqrtf(best_d);
-    return best;
-}
-
-// fire gate: prep toggle -> delay -> autoContinuousFire, with a forced burst pause
-static void fire_gate(Il2CppObject *player) {
-    uint64_t t = now_ms();
-    if (t_pause_until && t < t_pause_until) return;
-    if (m_fire_prep_on && m_fire_prep_off) {
-        kit_invoke(m_fire_prep_on, player, NULL);
-        if (cfg_continuous) kit_invoke(m_fire, player, NULL);
-        kit_invoke(m_fire_prep_off, player, NULL);
-    } else if (m_fire) {
-        kit_invoke(m_fire, player, NULL);
-    }
-    if (t > t_fire_until) {
-        t_fire_until = t + 3500;
-        t_pause_until = t_fire_until + cfg_burst_min + (uint64_t)(rand01() * (cfg_burst_max - cfg_burst_min));
-    }
-}
-
 @implementation TwinAim
-
 + (instancetype)shared { static TwinAim *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TwinAim new]; }); return s; }
-
 + (void)start {
     CADisplayLink *l = [CADisplayLink displayLinkWithTarget:[TwinAim shared] selector:@selector(step:)];
     [l addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
-// one frame: pick, sleep, slew, maybe commit
 - (void)step:(CADisplayLink *)link {
     @autoreleasepool {
         if (!twin_cfg_aim) { target = NULL; return; }
-        if (!ready && !resolve_aim()) return;
+        if (!g_domain) { if (!kit_resolve()) return; }
+        if (!ready && !aim_bind()) return;
+
+        Il2CppObject *cam = camera_object();
+        if (!cam) return;
+        Il2CppObject *camTr = camera_transform(cam);
+        if (!camTr) return;
+
         uint64_t t = now_ms();
-        Il2CppClass *oc = kit_find_class("Object");
-        if (!m_find_players || !oc) return;
-        Il2CppType *ty = g_kit.class_get_type(c_player);
-        Il2CppObject *typeObj = ty ? g_kit.type_get_object(ty) : NULL;
-        if (!typeObj) return;
-        int32_t include_inactive = 0;
-        void *args[2] = { typeObj, &include_inactive };
-        Il2CppArray *players = (Il2CppArray *)kit_invoke(m_find_players, NULL, args);
-        if (!players) return;
 
-        Vec3 eye = cam_position();
-        float dist = 0.f;
-        void *sel = pick_target(players, eye, &dist);
-        if (!sel) { target = NULL; return; }
-
-        if (sel != target) {
-            target = sel; t_pending_at = t;
-            return; // reaction window starts here, no turn yet
+        // scan every 400 ms; aim math runs every frame against the cached set
+        static Il2CppArray *cache;
+        static uint64_t lastScan;
+        if (!cache || t - lastScan > 400) {
+            Il2CppType *ty = g_kit.class_get_type(c_player_movement);
+            Il2CppObject *typeObj = ty ? g_kit.type_get_object(ty) : NULL;
+            if (typeObj) {
+                int32_t inc = 0;
+                void *args[2] = { typeObj, &inc };
+                cache = (Il2CppArray *)kit_invoke(m_find_all, NULL, args);
+            }
+            lastScan = t;
         }
+        if (!cache || cache->bounds.length == 0) { target = NULL; return; }
+
+        Vec3 eye = transform_position(camTr);
+
+        // pick the nearest player; the local one is whatever shares the camera transform
+        void *best = NULL;
+        float bestD2 = 1e9f;
+        for (size_t i = 0; i < cache->bounds.length; i++) {
+            Il2CppObject *pm = kit_arr_at(cache, i);
+            if (!pm) continue;
+            Il2CppObject *tr = kit_invoke(m_pm_get_tr, pm, NULL);
+            if (!tr || tr == camTr) continue;
+            Vec3 p = transform_position(tr);
+            float dx = p.x - eye.x, dy = p.y - eye.y, dz = p.z - eye.z;
+            float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < bestD2) { bestD2 = d2; best = pm; }
+        }
+        if (!best) { target = NULL; return; }
+
+        if (best != target) { target = best; t_pending_at = t; return; }
         if (t - t_pending_at < (uint64_t)cfg_reaction_ms) return;
         if (t_last_switch && t - t_last_switch < (uint64_t)cfg_switch_cd) return;
 
-        Vec3 head = bone_world((Il2CppObject *)sel, BONE_HEAD);
-        float dx = head.x - eye.x, dy = head.y - eye.y, dz = head.z - eye.z;
-        float want_yaw = atan2f(dy, dx) * kDeg;
-        float want_pitch = -atan2f(dz, sqrtf(dx*dx + dy*dy) + 1e-6f) * kDeg;
+        Il2CppObject *tgtTr = kit_invoke(m_pm_get_tr, (Il2CppObject *)best, NULL);
+        if (!tgtTr) return;
+        Vec3 tp = transform_position(tgtTr);
+        // head offset: stand-in until a bone accessor is confirmed
+        tp.z += cfg_head_only ? 1.6f : 1.0f;
+
+        float dx = tp.x - eye.x, dy = tp.y - eye.y, dz = tp.z - eye.z;
+        float wantYaw = atan2f(dx, dz) * kDeg;
+        float wantPitch = -atan2f(dy, sqrtf(dx * dx + dz * dz) + 1e-6f) * kDeg;
+
+        float curYaw, curPitch;
+        quat_to_yaw_pitch(transform_rotation(camTr), &curYaw, &curPitch);
 
         float dt = 1.f / 60.f;
-        float d_yaw = norm180(want_yaw - last_yaw);
-        float d_pitch = want_pitch - last_pitch;
-        if (fabsf(d_yaw) < 0.6f && fabsf(d_pitch) < 0.6f) { d_yaw *= 1.06f; d_pitch *= 1.06f; }
+        aim_yaw = curYaw + humanize(norm180(wantYaw - curYaw), dt);
+        aim_pitch = curPitch + humanize(wantPitch - curPitch, dt);
+        aim_pitch = clampf(aim_pitch, -89.f, 89.f);
 
-        last_yaw   += humanize(d_yaw, dt);
-        last_pitch += humanize(d_pitch, dt);
-
-        if (fabsf(norm180(want_yaw - last_yaw)) < 0.4f && fabsf(want_pitch - last_pitch) < 0.4f
-            && t - t_pending_at >= (uint64_t)(cfg_reaction_ms + cfg_fire_delay)) {
-            fire_gate((Il2CppObject *)sel);
-            t_last_fire = t;
-        }
+        set_transform_rotation(camTr, quat_from_yaw_pitch(aim_yaw, aim_pitch));
     }
+    (void)link;
 }
-
 @end
 
 __attribute__((constructor))
 static void twin_aim_boot(void) {
-    kit_resolve();
-    [TwinAim start];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        kit_resolve();
+        [TwinAim start];
+    });
 }

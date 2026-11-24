@@ -1,39 +1,44 @@
 // language: Objective-C++, file: twin/twin_ui.mm, target: iOS 15+, arm64
-// *floating ball opens a panel; every switch flips a shared bool the modules read each frame*
+// Compact floating panel. Five controls only:
+//   自瞄 / 透视 / 透明度 / 检测屏蔽 / 清除设备封禁
+// The author line at the bottom is left editable at build time.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 
-// shared switches, read by twin_esp / twin_aim / shield
-// plain C++ linkage: all twin_*.mm are compiled as ObjC++ so names match
-bool twin_cfg_esp   = true;
-bool twin_cfg_aim   = true;
-bool twin_cfg_shield = true;
+// switches + slider, read by twin_esp / twin_aim / shield
+bool  twin_cfg_aim    = true;
+bool  twin_cfg_esp    = true;
+bool  twin_cfg_shield = true;
+float twin_cfg_opacity = 0.38f;
 
-// these live in twin_*.mm and are plain C++ too
+// author line — replace the text, keep the label
+static NSString *const kAuthorLine = @"作者：@hualuo88";
+
 BOOL twin_backup_save(void);
 BOOL twin_backup_restore(void);
 BOOL twin_backup_clear(void);
 NSDictionary *twin_unban_clear(void);
 BOOL twin_shield_arm(void);
 
-static const CGFloat kBallSize = 44.f;
+static const CGFloat kBall = 46.f;
+static const CGFloat kPanelW = 260.f;
+
+#pragma mark - floating ball
 
 @interface TwinBall : UIView
-@property (nonatomic, assign) CGPoint dragStart;
-@property (nonatomic, assign) CGPoint ballStart;
 @end
-
 @implementation TwinBall
 - (instancetype)initWithFrame:(CGRect)f {
     if (self = [super initWithFrame:f]) {
         self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-        self.layer.cornerRadius = kBallSize / 2;
-        self.layer.borderWidth = 2;
-        self.layer.borderColor = [UIColor colorWithRed:0.2 green:0.9 blue:0.5 alpha:0.9].CGColor;
+        self.layer.cornerRadius = kBall / 2;
+        self.layer.borderWidth = 1.5;
+        self.layer.borderColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:0.9].CGColor;
         UILabel *l = [[UILabel alloc] initWithFrame:self.bounds];
         l.text = @"T";
-        l.textColor = [UIColor colorWithRed:0.2 green:0.9 blue:0.5 alpha:1];
-        l.font = [UIFont boldSystemFontOfSize:20];
+        l.textColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+        l.font = [UIFont boldSystemFontOfSize:19];
         l.textAlignment = NSTextAlignmentCenter;
         l.userInteractionEnabled = NO;
         [self addSubview:l];
@@ -42,73 +47,111 @@ static const CGFloat kBallSize = 44.f;
 }
 @end
 
+#pragma mark - panel
+
 @interface TwinPanel : UIViewController
-@property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UILabel *opacityValue;
 @end
 
 @implementation TwinPanel
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
-    self.scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
-    self.scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:self.scroll];
+    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.9];
 
-    self.stack = [[UIStackView alloc] initWithFrame:CGRectMake(16, 40, self.view.bounds.size.width - 32, 0)];
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelW, 0)];
+    card.backgroundColor = [[UIColor colorWithWhite:0.10 alpha:1.0] colorWithAlphaComponent:1.0];
+    card.layer.cornerRadius = 14;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:card];
+
+    self.stack = [[UIStackView alloc] init];
     self.stack.axis = UILayoutConstraintAxisVertical;
-    self.stack.spacing = 12;
-    self.stack.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [self.scroll addSubview:self.stack];
+    self.stack.spacing = 10;
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:self.stack];
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
+    [NSLayoutConstraint activateConstraints:@[
+        [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        [card.widthAnchor constraintEqualToConstant:kPanelW],
+        [self.stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [self.stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [self.stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [self.stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+    ]];
+
+    // header: title left, author line right
+    UIStackView *head = [[UIStackView alloc] init];
+    head.axis = UILayoutConstraintAxisHorizontal;
+    UILabel *title = [UILabel new];
     title.text = @"twin";
-    title.font = [UIFont boldSystemFontOfSize:22];
-    title.textColor = [UIColor colorWithRed:0.2 green:0.9 blue:0.5 alpha:1];
-    [self.stack addArrangedSubview:title];
+    title.textColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+    title.font = [UIFont boldSystemFontOfSize:19];
+    UILabel *author = [UILabel new];
+    author.text = kAuthorLine;
+    author.textColor = UIColor.lightGrayColor;
+    author.font = [UIFont systemFontOfSize:11];
+    author.textAlignment = NSTextAlignmentRight;
+    [head addArrangedSubview:title];
+    [head addArrangedSubview:author];
+    [self.stack addArrangedSubview:head];
 
-    self.status = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.status.numberOfLines = 0;
-    self.status.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    self.status.textColor = UIColor.lightGrayColor;
-    [self.stack addArrangedSubview:self.status];
+    [self addSwitch:@"自瞄" tag:1 on:twin_cfg_aim];
+    [self addSwitch:@"透视" tag:2 on:twin_cfg_esp];
 
-    [self addSwitch:@"方框透视" on:twin_cfg_esp tag:1];
-    [self addSwitch:@"自瞄锁头" on:twin_cfg_aim tag:2];
-    [self addSwitch:@"检测屏蔽" on:twin_cfg_shield tag:3];
+    // opacity slider, green track when low alpha keeps boxes faint
+    self.opacityValue = [UILabel new];
+    self.opacityValue.textColor = UIColor.whiteColor;
+    self.opacityValue.font = [UIFont systemFontOfSize:12];
+    self.opacityValue.text = [NSString stringWithFormat:@"透明度 %.0f%%", twin_cfg_opacity * 100];
+    [self.stack addArrangedSubview:self.opacityValue];
 
-    [self addButton:@"立即备份" color:[UIColor systemGreenColor] action:@selector(doBackup)];
-    [self addButton:@"恢复备份" color:[UIColor systemBlueColor] action:@selector(doRestore)];
+    UISlider *sl = [[UISlider alloc] init];
+    sl.minimumValue = 0.05f;
+    sl.maximumValue = 1.0f;
+    sl.value = twin_cfg_opacity;
+    sl.tintColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+    [sl addTarget:self action:@selector(opacityChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:sl];
+
+    [self addSwitch:@"检测屏蔽" tag:3 on:twin_cfg_shield];
     [self addButton:@"清除设备封禁" color:[UIColor systemOrangeColor] action:@selector(doUnban)];
-    [self addButton:@"清除配置" color:[UIColor systemRedColor] action:@selector(doClear)];
-
     [self addButton:@"关闭" color:UIColor.darkGrayColor action:@selector(doClose)];
-    [self relayout];
+
+    self.status = [UILabel new];
+    self.status.numberOfLines = 0;
+    self.status.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    self.status.textColor = UIColor.lightGrayColor;
+    self.status.text = @"";
+    [self.stack addArrangedSubview:self.status];
 }
 
-- (void)relayout {
-    CGSize s = self.stack.systemLayoutSizeFittingSize:CGSizeMake(self.view.bounds.size.width - 32, 0)
-                    withCompressionResistancePriority:UILayoutPriorityDefaultHigh
-                              forOrientation:UILayoutConstraintAxisVertical];
-    self.stack.frame = CGRectMake(16, 40, self.view.bounds.size.width - 32, s.height);
-    self.scroll.contentSize = CGSizeMake(self.view.bounds.size.width, s.height + 80);
-}
-
-- (void)addSwitch:(NSString *)label on:(bool)on tag:(NSInteger)tag {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.stack.frame.size.width, 44)];
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, row.bounds.size.width - 70, 44)];
-    l.text = label; l.textColor = UIColor.whiteColor;
-    l.font = [UIFont systemFontOfSize:15];
-    l.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+- (void)addSwitch:(NSString *)label tag:(NSInteger)tag on:(bool)on {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *l = [UILabel new];
+    l.text = label;
+    l.textColor = UIColor.whiteColor;
+    l.font = [UIFont systemFontOfSize:14];
+    l.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:l];
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(row.bounds.size.width - 60, 6, 51, 31)];
+    UISwitch *sw = [UISwitch new];
     sw.on = on;
     sw.tag = tag;
-    sw.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    sw.onTintColor = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:1];
+    sw.translatesAutoresizingMaskIntoConstraints = NO;
     [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
     [row addSubview:sw];
+    [NSLayoutConstraint activateConstraints:@[
+        [l.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [l.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [sw.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32],
+    ]];
     [self.stack addArrangedSubview:row];
 }
 
@@ -116,36 +159,37 @@ static const CGFloat kBallSize = 44.f;
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     [b setTitle:title forState:UIControlStateNormal];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    b.backgroundColor = [color colorWithAlphaComponent:0.75];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    b.backgroundColor = [color colorWithAlphaComponent:0.7];
     b.layer.cornerRadius = 8;
-    b.frame = CGRectMake(0, 0, self.stack.frame.size.width, 44);
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b.heightAnchor constraintEqualToConstant:38].active = YES;
     [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
     [self.stack addArrangedSubview:b];
 }
 
 - (void)switchChanged:(UISwitch *)sw {
     bool v = sw.isOn;
-    if (sw.tag == 1) twin_cfg_esp = v;
-    if (sw.tag == 2) twin_cfg_aim = v;
+    if (sw.tag == 1) twin_cfg_aim = v;
+    if (sw.tag == 2) twin_cfg_esp = v;
     if (sw.tag == 3) { twin_cfg_shield = v; if (v) twin_shield_arm(); }
-    NSLog(@"[twin] switch %ld -> %d", (long)sw.tag, v);
 }
 
-- (void)doBackup  { BOOL ok = twin_backup_save();    [self toast:ok ? @"已备份" : @"备份失败"]; }
-- (void)doRestore { BOOL ok = twin_backup_restore(); [self toast:ok ? @"已恢复" : @"无备份"]; }
-- (void)doUnban   { twin_unban_clear();              [self toast:@"已重置设备指纹，冷启动生效"]; }
-- (void)doClear   { twin_backup_clear();             [self toast:@"已清除"]; }
-- (void)doClose   { [self dismissViewControllerAnimated:YES completion:nil]; }
-
-- (void)toast:(NSString *)msg {
-    self.status.text = msg;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.status.text = @"";
-    });
+- (void)opacityChanged:(UISlider *)sl {
+    twin_cfg_opacity = sl.value;
+    self.opacityValue.text = [NSString stringWithFormat:@"透明度 %.0f%%", sl.value * 100];
 }
+
+- (void)doUnban {
+    NSDictionary *r = twin_unban_clear();
+    self.status.text = r[@"needsColdStart"] ? @"设备指纹已重置，冷启动生效" : @"重置完成";
+}
+
+- (void)doClose { [self dismissViewControllerAnimated:YES completion:nil]; }
 
 @end
+
+#pragma mark - host
 
 @interface TwinHost : NSObject
 + (instancetype)shared;
@@ -153,44 +197,43 @@ static const CGFloat kBallSize = 44.f;
 @end
 
 @implementation TwinHost
-
 + (instancetype)shared { static TwinHost *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [TwinHost new]; }); return s; }
 
-- (UIWindow *)host {
-    for (UIWindowScene *sc in UIApplication.sharedApplication.connectedScenes) {
+- (UIWindow *)keyWindow {
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *w in sc.windows) if (w.isKeyWindow) return w;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) if (w.isKeyWindow) return w;
     }
     return UIApplication.sharedApplication.windows.firstObject;
 }
 
 - (void)install {
-    UIWindow *win = [self host];
-    if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self install]; }); return; }
-
+    UIWindow *win = [self keyWindow];
+    if (!win) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self install]; });
+        return;
+    }
     CGSize s = win.bounds.size;
-    TwinBall *ball = [[TwinBall alloc] initWithFrame:CGRectMake(s.width - kBallSize - 12, s.height * 0.35, kBallSize, kBallSize)];
+    TwinBall *ball = [[TwinBall alloc] initWithFrame:CGRectMake(s.width - kBall - 12, s.height * 0.35, kBall, kBall)];
     ball.userInteractionEnabled = YES;
     [win addSubview:ball];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
     [ball addGestureRecognizer:pan];
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTap)];
-    [ball addGestureRecognizer:tap];
-    objc_setAssociatedObject(win, "twin.ball", ball, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [ball addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTap)]];
 }
 
 - (void)onPan:(UIPanGestureRecognizer *)g {
-    UIView *ball = g.view;
+    UIView *ball = g.view, *sv = ball.superview;
     if (g.state == UIGestureRecognizerStateBegan) {
         objc_setAssociatedObject(ball, "start", [NSValue valueWithCGPoint:ball.center], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else if (g.state == UIGestureRecognizerStateChanged) {
-        CGPoint start = [(NSValue *)objc_getAssociatedObject(ball, "start") CGPointValue];
-        CGPoint t = [g translationInView:ball.superview];
-        ball.center = CGPointMake(start.x + t.x, start.y + t.y);
+        CGPoint st = [(NSValue *)objc_getAssociatedObject(ball, "start") CGPointValue];
+        CGPoint t = [g translationInView:sv];
+        ball.center = CGPointMake(st.x + t.x, st.y + t.y);
     } else if (g.state == UIGestureRecognizerStateEnded) {
-        [UIView animateWithDuration:0.25 animations:^{
-            CGFloat maxX = ball.superview.bounds.size.width - ball.bounds.size.width / 2;
+        [UIView animateWithDuration:0.22 animations:^{
+            CGFloat maxX = sv.bounds.size.width - ball.bounds.size.width / 2;
             ball.center = CGPointMake(ball.center.x > maxX / 2 ? maxX : ball.bounds.size.width / 2, ball.center.y);
         }];
     }
@@ -199,17 +242,10 @@ static const CGFloat kBallSize = 44.f;
 - (void)onTap {
     TwinPanel *p = [TwinPanel new];
     p.modalPresentationStyle = UIModalPresentationOverFullScreen;
-    UIViewController *root = [self rootVC];
+    UIViewController *root = self.keyWindow.rootViewController;
+    while (root.presentedViewController) root = root.presentedViewController;
     [root presentViewController:p animated:YES completion:nil];
 }
-
-- (UIViewController *)rootVC {
-    UIWindow *win = [self host];
-    UIViewController *vc = win.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    return vc;
-}
-
 @end
 
 __attribute__((constructor))

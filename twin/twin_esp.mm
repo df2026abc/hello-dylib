@@ -1,14 +1,17 @@
 // language: Objective-C++, file: twin/twin_esp.mm, target: iOS 15+, arm64
-// *every frame rebuilds the layer list; a stale rect on screen is worse than none*
+// ESP box renderer. Real class/field names come from the game's global-metadata:
+//   PlayerMovement._tr / PlayerMovement._skeleton  -> per-player world anchor
+//   UnityEngine.Camera.WorldToScreenPoint          -> projection
+// Green 1px outline only; nothing else drawn.
 #import "il2cpp_kit.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 
 typedef struct { float x, y, z; } Vec3;
 
+// switches driven by the panel
 extern bool twin_cfg_esp;
-
-#pragma mark - layer
+extern float twin_cfg_opacity;
 
 @interface TwinEspLayer : UIView
 @property (nonatomic, strong) NSMutableArray<UIView *> *pool;
@@ -16,81 +19,90 @@ extern bool twin_cfg_esp;
 @end
 
 @implementation TwinEspLayer
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    if (self = [super initWithFrame:frame]) {
+- (instancetype)initWithFrame:(CGRect)f {
+    if (self = [super initWithFrame:f]) {
         self.userInteractionEnabled = NO;
         self.backgroundColor = UIColor.clearColor;
         self.pool = [NSMutableArray array];
     }
     return self;
 }
-
-// pooled boxes: steady-state frames allocate nothing
 - (void)setRects:(NSArray<NSValue *> *)rects {
     NSUInteger need = rects.count;
     while (self.pool.count < need) {
         UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
         box.userInteractionEnabled = NO;
         box.backgroundColor = UIColor.clearColor;
-        box.layer.borderColor = UIColor.greenColor.CGColor;
-        box.layer.borderWidth = 1.0;
+        box.layer.borderWidth = 1.5;
         box.hidden = YES;
         [self addSubview:box];
         [self.pool addObject:box];
     }
+    // green outline, alpha follows the panel slider
+    UIColor *green = [UIColor colorWithRed:0.15 green:1.0 blue:0.35 alpha:twin_cfg_opacity];
     for (NSUInteger i = 0; i < self.pool.count; i++) {
         UIView *box = self.pool[i];
-        if (i < need) { box.frame = [rects[i] CGRectValue]; box.hidden = NO; }
-        else          { box.hidden = YES; }
+        if (i < need) {
+            box.layer.borderColor = green.CGColor;
+            box.frame = [rects[i] CGRectValue];
+            box.hidden = NO;
+        } else {
+            box.hidden = YES;
+        }
     }
 }
-
 @end
 
-#pragma mark - managed handles
-
-static Il2CppClass  *c_camera, *c_player, *c_object;
-static Il2CppMethod *m_w2s, *m_main, *m_get_pos, *m_get_tf, *m_find;
+// ---- managed handles ----
+static Il2CppClass *c_camera, *c_player_movement;
+static Il2CppMethod *m_cam_main, *m_w2s;
+static Il2CppMethod *m_pm_get_tr, *m_tr_get_pos;
+static Il2CppMethod *m_find_all;
+static Il2CppArray *g_cache;
 static TwinEspLayer *g_layer;
 static BOOL g_ready;
+static CFAbsoluteTime g_lastScan;
 
 static Il2CppArray *find_players(void) {
-    if (!c_object) c_object = kit_find_class("Object");
-    if (!c_player) c_player = kit_find_class("Player");
-    if (!m_find && c_object) {
-        // the non-generic FindObjectsOfType(Type, bool) overload Unity ships
-        for (int argc = 1; argc <= 2 && !m_find; argc++)
-            m_find = g_kit.class_get_method_from_name(c_object, "FindObjectsOfType", argc);
+    if (!c_player_movement) return NULL;
+    if (!m_find_all) {
+        Il2CppClass *oc = kit_find_class("Object");
+        if (!oc) return NULL;
+        for (int argc = 1; argc <= 2 && !m_find_all; argc++)
+            m_find_all = g_kit.class_get_method_from_name(oc, "FindObjectsOfType", argc);
     }
-    if (!m_find || !c_player) return NULL;
-    Il2CppType *t = g_kit.class_get_type(c_player);
-    Il2CppObject *typeObj = t ? g_kit.type_get_object(t) : NULL;
+    if (!m_find_all) return NULL;
+    Il2CppType *ty = g_kit.class_get_type(c_player_movement);
+    Il2CppObject *typeObj = ty ? g_kit.type_get_object(ty) : NULL;
     if (!typeObj) return NULL;
-    int32_t include_inactive = 0;
-    void *args[2] = { typeObj, &include_inactive };
-    return (Il2CppArray *)kit_invoke(m_find, NULL, args);
+    int32_t includeInactive = 0;
+    void *args[2] = { typeObj, &includeInactive };
+    return (Il2CppArray *)kit_invoke(m_find_all, NULL, args);
 }
 
 static BOOL esp_bind(void) {
     if (!g_domain) return NO;
     c_camera = kit_find_class("Camera");
-    c_player = kit_find_class("Player");
-    if (!c_camera || !c_player) return NO;
-    m_main    = kit_method(c_camera, "get_main", 0);
-    m_w2s     = kit_method(c_camera, "WorldToScreenPoint", 1);
-    m_get_tf  = kit_method(c_player, "get_transform", 0);
-    m_get_pos = kit_method(c_player, "get_position", 0);
-    g_ready = (m_main && m_w2s && m_get_tf && m_get_pos);
+    // the class name in metadata is "PlayerMovement", no namespace
+    c_player_movement = kit_find_class("PlayerMovement");
+    if (!c_camera || !c_player_movement) return NO;
+
+    m_cam_main = kit_method(c_camera, "get_main", 0);
+    m_w2s = kit_method(c_camera, "WorldToScreenPoint", 1);
+    m_pm_get_tr = kit_method(c_player_movement, "get_transform", 0);
+    Il2CppClass *tf = kit_find_class("Transform");
+    m_tr_get_pos = tf ? kit_method(tf, "get_position", 0) : NULL;
+
+    g_ready = (m_cam_main && m_w2s && m_pm_get_tr && m_tr_get_pos);
     return g_ready;
 }
 
-// world -> screen; z inside the boxed Vector3 flips sign behind the camera
-static BOOL point_to_screen(Il2CppObject *cam, Vec3 world, CGPoint *out) {
+static BOOL project(Il2CppObject *cam, Vec3 world, CGPoint *out) {
+    if (!cam || !m_w2s) return NO;
     void *args[1] = { &world };
     Il2CppObject *res = kit_invoke(m_w2s, cam, args);
     if (!res) return NO;
-    Vec3 *v = (Vec3 *)((char *)res + 0x10);
+    Vec3 *v = (Vec3 *)((char *)res + 0x10); // Vector3 payload after object header
     if (v->z <= 0.01f) return NO;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGFloat h = UIScreen.mainScreen.bounds.size.height * scale;
@@ -99,63 +111,77 @@ static BOOL point_to_screen(Il2CppObject *cam, Vec3 world, CGPoint *out) {
     return YES;
 }
 
-#pragma mark - driver
-
 @interface TwinEspDriver : NSObject
++ (instancetype)shared;
 + (void)start;
 - (void)step:(CADisplayLink *)link;
 @end
 
 @implementation TwinEspDriver
-
 + (instancetype)shared {
-    static TwinEspDriver *s; static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = [TwinEspDriver new]; });
+    static TwinEspDriver *s;
+    static dispatch_once_t o;
+    dispatch_once(&o, ^{ s = [TwinEspDriver new]; });
     return s;
 }
-
 + (void)start {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = UIApplication.sharedApplication.windows.firstObject;
-        if (!win) return;
+        UIWindow *win = nil;
+        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+            if (![sc isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                if (w.isKeyWindow) { win = w; break; }
+            if (win) break;
+        }
+        if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+        if (!win) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self start]; }); return; }
         g_layer = [[TwinEspLayer alloc] initWithFrame:win.bounds];
         [win addSubview:g_layer];
         CADisplayLink *l = [CADisplayLink displayLinkWithTarget:[TwinEspDriver shared] selector:@selector(step:)];
         [l addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     });
 }
-
 - (void)step:(CADisplayLink *)link {
     @autoreleasepool {
-        if (!twin_cfg_esp) { [g_layer setRects:@[]]; return; }
+        if (!twin_cfg_esp) { if (g_layer.hidden == NO) { [g_layer setRects:@[]]; } return; }
         if (!g_domain) { if (!kit_resolve()) return; }
         if (!g_ready && !esp_bind()) return;
-        Il2CppObject *cam = kit_invoke(m_main, NULL, NULL);
+
+        Il2CppObject *cam = kit_invoke(m_cam_main, NULL, NULL);
         if (!cam) return;
-        Il2CppArray *players = find_players();
-        if (!players) return;
+
+        // rescan the scene every 500 ms; per-frame enumeration is wasteful
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (!g_cache || now - g_lastScan > 0.5) {
+            g_cache = find_players();
+            g_lastScan = now;
+        }
 
         NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:16];
-        for (size_t i = 0; i < players->bounds.length; i++) {
-            Il2CppObject *p = kit_arr_at(players, i);
-            if (!p) continue;
-            Il2CppObject *tf  = kit_invoke(m_get_tf, p, NULL);
-            Il2CppObject *pos = tf ? kit_invoke(m_get_pos, tf, NULL) : NULL;
-            if (!pos) continue;
-            Vec3 world = *(Vec3 *)((char *)pos + 0x10);
-            CGPoint sp;
-            if (!point_to_screen(cam, world, &sp)) continue;
-            [rects addObject:[NSValue valueWithCGRect:CGRectMake(sp.x - 12, sp.y - 18, 24, 36)]];
+        if (g_cache) {
+            for (size_t i = 0; i < g_cache->bounds.length; i++) {
+                Il2CppObject *pm = kit_arr_at(g_cache, i);
+                if (!pm) continue;
+                Il2CppObject *tr = kit_invoke(m_pm_get_tr, pm, NULL);
+                if (!tr) continue;
+                Il2CppObject *posObj = kit_invoke(m_tr_get_pos, tr, NULL);
+                if (!posObj) continue;
+                Vec3 world = *(Vec3 *)((char *)posObj + 0x10);
+                CGPoint sp;
+                if (!project(cam, world, &sp)) continue;
+                [rects addObject:[NSValue valueWithCGRect:CGRectMake(sp.x - 12, sp.y - 18, 24, 36)]];
+            }
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [g_layer setRects:rects]; });
     }
     (void)link;
 }
-
 @end
 
 __attribute__((constructor))
 static void twin_esp_boot(void) {
-    kit_resolve();
-    [TwinEspDriver start];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        kit_resolve();
+        [TwinEspDriver start];
+    });
 }
