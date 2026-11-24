@@ -17,6 +17,10 @@ typedef struct { float x, y, z; } Vec3;
 extern bool twin_cfg_esp;
 extern float twin_cfg_opacity;
 
+// 方框几何：头顶世界坐标相对脚底的偏移，以及框宽/框高的比例
+static const CGFloat kHeadHeight = 1.75f;   // 世界单位(Y轴)
+static const CGFloat kBoxRatio   = 0.42f;   // 宽 = 高 * 0.42
+
 @interface TwinEspLayer : UIView
 @property (nonatomic, strong) NSMutableArray<NSValue *> *boxes;
 - (void)setRects:(NSArray<NSValue *> *)rects;
@@ -217,10 +221,20 @@ static BOOL project(Il2CppObject *cam, Vec3 w, CGPoint *out) {
             Vec3 w;
             if (!player_world(pc, &w)) continue;
             g_pos_ok = 1;
-            CGPoint sp;
-            if (!project(cam, w, &sp)) continue;
+
+            // 脚底与头顶分别投影，框高随距离自然缩放
+            CGPoint foot, head;
+            if (!project(cam, w, &foot)) continue;
+            Vec3 wHead = w; wHead.y += kHeadHeight;
+            if (!project(cam, wHead, &head)) continue;
             g_w2s_ok = 1;
-            [rects addObject:[NSValue valueWithCGRect:CGRectMake(sp.x - 12, sp.y - 18, 24, 36)]];
+
+            CGFloat boxH = foot.y - head.y;        // 屏幕像素高度
+            if (boxH < 8.0f || boxH > 4000.0f) continue;  // 剔除异常值
+            CGFloat boxW = boxH * kBoxRatio;       // 宽高比
+            CGFloat px = foot.x - boxW * 0.5f;
+            CGFloat py = head.y - 4.0f;
+            [rects addObject:[NSValue valueWithCGRect:CGRectMake(px, py, boxW, boxH + 4.0f)]];
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [g_layer setRects:rects]; });
     }
