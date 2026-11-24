@@ -250,34 +250,51 @@ static void draw_once(void) {
 
     NSMutableArray *rects = [NSMutableArray array];
     int okCount = 0;
+    // 诊断计数器
+    int cDead=0, cNull=0, cZero=0, cW2SFail=0, cahead=0, cNeg=0, cH=0;
+    int diag = (g_frameCount == 300 || g_frameCount == 600);
 
     for (size_t i = 0; i < len; i++) {
         void *pc = arr->vector[i];
-        if (!pc) continue;
-        if (*(uint8_t*)((uint8_t*)pc + 0xa8)) continue;
+        if (!pc) { cNull++; continue; }
+        if (*(uint8_t*)((uint8_t*)pc + 0xa8)) { cDead++; continue; }
 
         void *mv  = rdp(pc, 0x40);
         void *cam = rdp(pc, 0x30);
-        if (!mv || !cam) continue;
+        if (!mv || !cam) { cNull++; continue; }
 
         V3 pos = rd3(mv, 0x268);
-        if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
+        if (pos.x == 0 && pos.y == 0 && pos.z == 0) { cZero++; continue; }
+
+        if (diag && i < 3) {
+            w("  [%zu] pos=(%.2f,%.2f,%.2f) mv=%p cam=%p\n", i, pos.x, pos.y, pos.z, mv, cam);
+        }
 
         V3 head = { pos.x, pos.y + 0.75f, pos.z };
         V3 sH, sF;
-        if (!world_to_screen(cam, head, &sH)) continue;
-        if (!world_to_screen(cam, pos, &sF)) continue;
-        if (sH.z < 0 || sF.z < 0) continue;
+        if (!world_to_screen(cam, head, &sH)) { cW2SFail++; continue; }
+        if (!world_to_screen(cam, pos, &sF)) { cW2SFail++; continue; }
+        if (sH.z < 0 || sF.z < 0) { cNeg++; continue; }
+
+        if (diag && i < 3) {
+            w("      screen head=(%.1f,%.1f,%.1f) foot=(%.1f,%.1f,%.1f)\n",
+              sH.x, sH.y, sH.z, sF.x, sF.y, sF.z);
+        }
 
         CGFloat yHead = g_sh - sH.y;
         CGFloat yFoot = g_sh - sF.y;
         CGFloat h = fabs(yFoot - yHead);
-        if (h < 4 || h > g_sh) continue;
+        if (h < 4 || h > g_sh) { cH++; continue; }
         CGFloat wpx = h * 0.45f;
 
         [rects addObject:[NSValue valueWithCGRect:
             CGRectMake(sH.x - wpx*0.5f, yHead, wpx, h)]];
         okCount++;
+    }
+
+    if (diag) {
+        w("  diag: dead=%d null=%d zero=%d w2sFail=%d neg=%d hOut=%d\n",
+          cDead, cNull, cZero, cW2SFail, cNeg, cH);
     }
 
     if (g_frameCount == 1 || g_frameCount == 60 || g_frameCount == 300) {
