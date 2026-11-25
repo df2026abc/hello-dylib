@@ -14,18 +14,18 @@ jobs:
           mkdir -p "$HOME/sdk" && cd "$HOME/sdk"
           curl -L --fail -o sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz
           tar -xJf sdk.tar.xz
-      - name: Build cf_scan
+      - name: Build cf_probe3
         run: |
           SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
           clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
             -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
             -Wl,-undefined,dynamic_lookup \
-            -Wl,-install_name,@executable_path/cf_scan.dylib \
+            -Wl,-install_name,@executable_path/Frameworks/cf_probe3.dylib \
             -framework Foundation -framework UIKit \
-            cf_scan.mm -o cf_scan.dylib
-          ls -lh cf_scan.dylib
+            cf_probe3.mm -o cf_probe3.dylib
+          ls -lh cf_probe3.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: cf_scan
-          path: cf_scan.dylib
+          name: cf_probe3
+          path: cf_probe3.dylib
           if-no-files-found: error
