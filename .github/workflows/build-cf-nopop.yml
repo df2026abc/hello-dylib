@@ -17,10 +17,11 @@ jobs:
       - name: Build cf_probe3
         run: |
           SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
-          clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
-            -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
+          clang++ -target arm64-apple-ios15.0 \
+            -isysroot "$SDK" \
+            -dynamiclib -fobjc-arc -std=c++17 -O2 \
             -Wl,-undefined,dynamic_lookup \
-            -Wl,-install_name,@executable_path/Frameworks/cf_probe3.dylib \
+            -Wl,-install_name,@executable_path/cf_probe3.dylib \
             -framework Foundation -framework UIKit \
             cf_probe3.mm -o cf_probe3.dylib
           ls -lh cf_probe3.dylib
