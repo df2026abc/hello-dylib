@@ -189,6 +189,37 @@ static void apply_all(void *cls_pc) {
     w("\n[apply] 写了 %d 个 skeleton\n", n);
 }
 
+// 轮询直到拿到玩家，拿到后执行上色
+static void poll_and_apply(void *cls_pc, int tries) {
+    Il2CppArray *arr = get_players(cls_pc);
+    size_t len = arr ? arr->max_length : 0;
+
+    if (len == 0) {
+        if (tries % 5 == 0) w("轮询中… 第 %d 次，玩家 0\n", tries);
+        if (tries >= 60) { w("超时：一直拿不到玩家\n"); return; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            @autoreleasepool { poll_and_apply(cls_pc, tries + 1); }
+        });
+        return;
+    }
+
+    w("拿到玩家 %zu 个（第 %d 次轮询）\n", len, tries);
+
+    // 1. 改之前读
+    dump_all("BEFORE", cls_pc);
+
+    // 2. 写入
+    apply_all(cls_pc);
+
+    // 3. 等 2 秒再读，确认
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        dump_all("AFTER", cls_pc);
+        w("\n===== done =====\n");
+    });
+}
+
 // ============================================================
 __attribute__((constructor))
 static void init(void) {
@@ -197,7 +228,7 @@ static void init(void) {
     g_fp = fopen(p.UTF8String, "w");
     w("cf_color loaded\n");
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
         @autoreleasepool {
             if (!resolve()) { w("resolve fail\n"); return; }
@@ -208,18 +239,7 @@ static void init(void) {
             w("cls_pc=%p cls_obj=%p\n", cls_pc, g_cls_obj);
             if (!cls_pc || !g_cls_obj) return;
 
-            // 1. 改之前读
-            dump_all("BEFORE", cls_pc);
-
-            // 2. 写入
-            apply_all(cls_pc);
-
-            // 3. 等 2 秒再读，确认
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-                           dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-                dump_all("AFTER", cls_pc);
-                w("\n===== done =====\n");
-            });
+            poll_and_apply(cls_pc, 0);
         }
     });
 }

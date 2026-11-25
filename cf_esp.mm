@@ -1,15 +1,14 @@
-// cf_esp.mm — CounterFlame 透视 v10：Transform 自算投影
+// cf_esp.mm — CounterFlame 透视 v11：矩阵投影（参考 Free Fire 开源方案）
 //
-// 思路：不再用 WorldToScreenPoint，用相机 Transform 自己算
-//   1. 读 _cameraTransform（PlayerMovement 0x30）的位置和朝向
-//   2. 相机空间 = 世界坐标 - 相机位置，再按相机旋转反向转
-//   3. 用 FOV 和宽高比投影到屏幕
+// 核心思路：
+//   1. 拿到相机的 4x4 view-projection 矩阵（16 个 float）
+//   2. 用矩阵直接算屏幕坐标，不调任何游戏函数
+//   3. 用 CALayer 画框，不用 drawRect
 //
-// 偏移（实测）：
+// 已知偏移（实测）：
 //   PlayerController._mainCamera         0x30
 //   PlayerController._movementController 0x40
 //   PlayerController._isDeath            0xa8
-//   PlayerMovement._cameraTransform      0x30
 //   PlayerMovement._currSimPosition      0x268
 //
 // 编译：
@@ -26,11 +25,6 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
-
-// 屏幕尺寸与宽高比（全局最早声明）
-static CGFloat g_sw = 0;
-static CGFloat g_sh = 0;
-static float   g_aspect = 1.0f;
 
 typedef struct Il2CppArray {
     void *klass; void *monitor; void *bounds;
@@ -62,7 +56,6 @@ static void *sym(const char *n) {
     return p ? p : dlsym(RTLD_NEXT, n);
 }
 
-
 static BOOL resolve(void) {
     f_domain=(p_domain_get)sym("il2cpp_domain_get");
     f_asm=(p_domain_get_assemblies)sym("il2cpp_domain_get_assemblies");
@@ -87,7 +80,8 @@ static void w(const char *fmt, ...) {
     vfprintf(g_fp, fmt, ap); va_end(ap); fflush(g_fp);
 }
 
-static void *cls_pc = NULL, *cls_obj = NULL, *cls_cam = NULL, *cls_tf = NULL;
+static void *cls_pc = NULL, *cls_obj = NULL, *cls_cam = NULL;
+static CGFloat g_sw = 0, g_sh = 0;
 
 static void *find_class(const char *name) {
     void *dom = f_domain(); size_t n = 0;
@@ -107,7 +101,6 @@ static void *find_class(const char *name) {
 }
 
 typedef struct { float x, y, z; } V3;
-typedef struct { float x, y, z, w; } Q4;
 
 static void *rdp(void *o, size_t off) {
     if (!o) return NULL;
@@ -120,97 +113,30 @@ static V3 rd3(void *o, size_t off) {
     return v;
 }
 
-// 调 Transform.get_position / get_rotation
-static BOOL tf_get_position(void *tf, V3 *out) {
-    if (!tf || !cls_tf) return NO;
-    void *m = f_method(cls_tf, "get_position", 0);
-    if (!m) return NO;
-    void *exc = NULL;
-    void *ret = f_invoke(m, tf, NULL, &exc);
-    if (exc || !ret) return NO;
-    V3 *p = (V3*)f_unbox(ret);
-    if (!p) return NO;
-    *out = *p;
-    return YES;
-}
+// ============================================================
+// 矩阵投影（参考 Free Fire 开源实现）
+// ============================================================
+typedef struct { float x, y; BOOL valid; } SCREEN;
 
-static BOOL tf_get_forward(void *tf, V3 *out) {
-    if (!tf || !cls_tf) return NO;
-    void *m = f_method(cls_tf, "get_forward", 0);
-    if (!m) return NO;
-    void *exc = NULL;
-    void *ret = f_invoke(m, tf, NULL, &exc);
-    if (exc || !ret) return NO;
-    V3 *p = (V3*)f_unbox(ret);
-    if (!p) return NO;
-    *out = *p;
-    return YES;
+static SCREEN matrix_project(const float *m, V3 obj, CGFloat sw, CGFloat sh) {
+    SCREEN s = {0, 0, NO};
+
+    float w = m[3]*obj.x + m[7]*obj.y + m[11]*obj.z + m[15];
+    if (w < 0.5f) w = 0.5f;
+
+    float x = (sw * 0.5f) + (m[0]*obj.x + m[4]*obj.y + m[8]*obj.z + m[12]) / w * (sw * 0.5f);
+    float y = (sh * 0.5f) - (m[1]*obj.x + m[5]*obj.y + m[9]*obj.z + m[13]) / w * (sh * 0.5f);
+
+    if (!isfinite(x) || !isfinite(y)) return s;
+    s.x = x; s.y = y; s.valid = YES;
+    return s;
 }
 
 // ============================================================
-// 自己算投影
-// 相机位置 C，朝向 F（forward），目标 P
-// 相机空间坐标：right/up/forward 基向量投影
-// ============================================================
-static BOOL world_to_screen_manual(void *tf_cam, V3 target, V3 *out) {
-    V3 camPos, fwd;
-    V3 up, right;
-
-    if (!tf_get_position(tf_cam, &camPos)) return NO;
-    if (!tf_get_forward(tf_cam, &fwd)) {
-        // forward 拿不到就用 up 也拿不到，直接失败
-        return NO;
-    }
-
-    // 归一化 forward
-    float fl = sqrtf(fwd.x*fwd.x + fwd.y*fwd.y + fwd.z*fwd.z);
-    if (fl < 1e-6f) return NO;
-    fwd.x /= fl; fwd.y /= fl; fwd.z /= fl;
-
-    // 世界 UP
-    V3 worldUp = {0, 1, 0};
-
-    // right = forward × up
-    right.x = fwd.y*worldUp.z - fwd.z*worldUp.y;
-    right.y = fwd.z*worldUp.x - fwd.x*worldUp.z;
-    right.z = fwd.x*worldUp.y - fwd.y*worldUp.x;
-    float rl = sqrtf(right.x*right.x + right.y*right.y + right.z*right.z);
-    if (rl < 1e-6f) return NO;
-    right.x /= rl; right.y /= rl; right.z /= rl;
-
-    // up = right × forward
-    up.x = right.y*fwd.z - right.z*fwd.y;
-    up.y = right.z*fwd.x - right.x*fwd.z;
-    up.z = right.x*fwd.y - right.y*fwd.x;
-
-    // 目标相对相机
-    V3 d = { target.x - camPos.x, target.y - camPos.y, target.z - camPos.z };
-
-    // 相机空间
-    float cx = d.x*right.x + d.y*right.y + d.z*right.z;
-    float cy = d.x*up.x    + d.y*up.y    + d.z*up.z;
-    float cz = d.x*fwd.x   + d.y*fwd.y   + d.z*fwd.z;
-
-    if (cz <= 0.01f) return NO;   // 在背后
-
-    // 用固定 FOV 做透视
-    const float fovDeg = 60.0f;
-    float tanHalf = tanf(fovDeg * 0.5f * (float)M_PI / 180.0f);
-
-    float ndcX = (cx / cz) / (tanHalf * g_aspect);
-    float ndcY = (cy / cz) / tanHalf;
-
-    out->x = (ndcX * 0.5f + 0.5f) * g_sw;
-    out->y = (ndcY * 0.5f + 0.5f) * g_sh;
-    out->z = cz;
-    return YES;
-}
-
-// ============================================================
-// 视图
+// 视图（CALayer 画框）
 // ============================================================
 @interface CfEspView : UIView
-@property (nonatomic, strong) NSMutableArray<NSValue *> *rects;
+@property (nonatomic, strong) NSMutableArray<CALayer *> *layers;
 @end
 
 @implementation CfEspView
@@ -219,20 +145,41 @@ static BOOL world_to_screen_manual(void *tf_cam, V3 target, V3 *out) {
     if (self) {
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
-        _rects = [NSMutableArray array];
+        _layers = [NSMutableArray array];
     }
     return self;
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e { return nil; }
-- (void)drawRect:(CGRect)rect {
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    if (!ctx) return;
-    CGContextSetStrokeColorWithColor(ctx,
-        [UIColor colorWithRed:0.1 green:1.0 blue:0.3 alpha:0.95].CGColor);
-    CGContextSetLineWidth(ctx, 2.0);
-    for (NSValue *v in self.rects) {
-        CGContextStrokeRect(ctx, [v CGRectValue]);
+
+- (void)setBoxes:(NSArray<NSValue *> *)boxes {
+    NSUInteger n = boxes.count;
+    if (n == 0) {
+        for (CALayer *l in self.layers) [l removeFromSuperlayer];
+        [self.layers removeAllObjects];
+        return;
     }
+    while (self.layers.count < n) {
+        CALayer *l = [CALayer layer];
+        l.borderColor = [UIColor colorWithRed:0.1 green:1 blue:0.3 alpha:0.9].CGColor;
+        l.borderWidth = 2.0;
+        l.cornerRadius = 2.0;
+        [self.layer addSublayer:l];
+        [self.layers addObject:l];
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (NSUInteger i = 0; i < self.layers.count; i++) {
+        CALayer *l = self.layers[i];
+        if (i < n) {
+            CGRect r;
+            [boxes[i] getValue:&r];
+            l.hidden = NO;
+            l.frame = r;
+        } else {
+            l.hidden = YES;
+        }
+    }
+    [CATransaction commit];
 }
 @end
 
@@ -242,36 +189,71 @@ static BOOL world_to_screen_manual(void *tf_cam, V3 target, V3 *out) {
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e { return nil; }
 @end
 
-static CfEspView *g_view = nil;
-static UIWindow *g_win = nil;
-static CADisplayLink *g_link = nil;
-static id g_driver = nil;
-static int g_frameCount = 0;
-
-static void draw_once(void);
-
 @interface CfDriver : NSObject
 - (void)onTick:(CADisplayLink *)link;
 @end
+
+static CfEspView *g_view = nil;
+static UIWindow *g_win = nil;
+static CADisplayLink *g_link = nil;
+static CfDriver *g_driver = nil;
+static int g_frame = 0;
+static BOOL g_matrixFound = NO;
+static size_t g_matOff = 0;
+
+static void tick(void);
+
 @implementation CfDriver
 - (void)onTick:(CADisplayLink *)link {
-    @autoreleasepool { draw_once(); }
+    @autoreleasepool { tick(); }
 }
 @end
 
 // ============================================================
-// 每帧
+// 扫相机对象里的矩阵
+// 判据：16 个 float，有限，不太大，像 view-projection 矩阵
 // ============================================================
-static void draw_once(void) {
-    if (!g_view) return;
-    g_frameCount++;
+static BOOL scan_matrix(void *cam, size_t *outOff) {
+    if (!cam) return NO;
+    for (size_t off = 0x20; off < 0x800; off += 4) {
+        float m[16];
+        BOOL ok = YES;
+        int zeros = 0, big = 0;
+        for (int k = 0; k < 16; k++) {
+            m[k] = *(float*)((uint8_t*)cam + off + k*4);
+            if (!isfinite(m[k])) { ok = NO; break; }
+            if (m[k] == 0.0f) zeros++;
+            if (fabsf(m[k]) > 1e4f) big++;
+        }
+        if (!ok || zeros < 3 || big > 0) continue;
 
+        // view-projection 矩阵特征：右下角通常非 0，且 m[15] 常为小数
+        // 或者 m[11] 或 m[14] 接近 ±1
+        float m11 = m[11], m14 = m[14], m15 = m[15];
+        BOOL looks = (fabsf(fabsf(m11) - 1.0f) < 0.2f) ||
+                     (fabsf(fabsf(m14) - 1.0f) < 0.2f) ||
+                     (fabsf(fabsf(m15) - 1.0f) < 0.2f && fabsf(m[3]) < 1e-3f);
+        if (!looks) continue;
+
+        *outOff = off;
+        return YES;
+    }
+    return NO;
+}
+
+// ============================================================
+// 主循环
+// ============================================================
+static void tick(void) {
+    if (!g_view || !cls_pc || !cls_obj) return;
+    g_frame++;
+
+    // 拿玩家
     void *m = f_method(cls_obj, "FindObjectsOfType", 1);
     if (!m) return;
     void *t = f_get_type(cls_pc);
     void *type = t ? f_type_obj(t) : NULL;
     if (!type) return;
-
     void *params[1] = { type };
     void *exc = NULL;
     void *ret = f_invoke(m, NULL, params, &exc);
@@ -280,9 +262,46 @@ static void draw_once(void) {
     Il2CppArray *arr = (Il2CppArray*)ret;
     size_t len = arr->max_length;
 
-    // 先找本地玩家的相机（有坐标的那个）
-    void *localCamTf = NULL;
-    int validCount = 0;
+    // 找一个有坐标的玩家拿相机
+    void *cam = NULL;
+    for (size_t i = 0; i < len; i++) {
+        void *pc = arr->vector[i];
+        if (!pc) continue;
+        if (*(uint8_t*)((uint8_t*)pc + 0xa8)) continue;
+        void *mv = rdp(pc, 0x40);
+        if (!mv) continue;
+        V3 p = rd3(mv, 0x268);
+        if (p.x == 0 && p.y == 0 && p.z == 0) continue;
+        cam = rdp(pc, 0x30);
+        if (cam) break;
+    }
+
+    // 首次扫矩阵
+    if (cam && !g_matrixFound) {
+        if (scan_matrix(cam, &g_matOff)) {
+            g_matrixFound = YES;
+            w("找到矩阵 @cam+0x%zx\n", g_matOff);
+            float mm[16];
+            memcpy(mm, (uint8_t*)cam + g_matOff, 64);
+            w("  [%.3f %.3f %.3f %.3f]\n", mm[0],mm[1],mm[2],mm[3]);
+            w("  [%.3f %.3f %.3f %.3f]\n", mm[4],mm[5],mm[6],mm[7]);
+            w("  [%.3f %.3f %.3f %.3f]\n", mm[8],mm[9],mm[10],mm[11]);
+            w("  [%.3f %.3f %.3f %.3f]\n", mm[12],mm[13],mm[14],mm[15]);
+        } else if (g_frame == 60) {
+            w("相机 %p 扫不到矩阵\n", cam);
+        }
+    }
+
+    if (!g_matrixFound || !cam) {
+        if (g_frame == 120) w("frame=120 玩家=%zu 矩阵未就绪\n", len);
+        return;
+    }
+
+    float mat[16];
+    memcpy(mat, (uint8_t*)cam + g_matOff, 64);
+
+    NSMutableArray *boxes = [NSMutableArray array];
+    int ok = 0;
     for (size_t i = 0; i < len; i++) {
         void *pc = arr->vector[i];
         if (!pc) continue;
@@ -291,55 +310,31 @@ static void draw_once(void) {
         if (!mv) continue;
         V3 pos = rd3(mv, 0x268);
         if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
-        validCount++;
-        if (!localCamTf) localCamTf = rdp(mv, 0x30);
+
+        V3 head = { pos.x, pos.y + 0.75f, pos.z };
+        SCREEN sh = matrix_project(mat, head, g_sw, g_sh);
+        SCREEN sf = matrix_project(mat, pos, g_sw, g_sh);
+        if (!sh.valid || !sf.valid) continue;
+
+        CGFloat bh = fabs(sf.y - sh.y);
+        if (bh < 4 || bh > g_sh * 2) continue;
+        CGFloat bw = bh * 0.45f;
+        CGRect r = CGRectMake(sh.x - bw*0.5f, sh.y, bw, bh);
+
+        [boxes addObject:[NSValue valueWithBytes:&r objCType:@encode(CGRect)]];
+        ok++;
     }
 
-    NSMutableArray *rects = [NSMutableArray array];
-    int okCount = 0;
-
-    if (localCamTf && validCount > 0) {
-        for (size_t i = 0; i < len; i++) {
-            void *pc = arr->vector[i];
-            if (!pc) continue;
-            if (*(uint8_t*)((uint8_t*)pc + 0xa8)) continue;
-            void *mv = rdp(pc, 0x40);
-            if (!mv) continue;
-            V3 pos = rd3(mv, 0x268);
-            if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
-
-            V3 head = { pos.x, pos.y + 0.75f, pos.z };
-            V3 sH, sF;
-            if (!world_to_screen_manual(localCamTf, head, &sH)) continue;
-            if (!world_to_screen_manual(localCamTf, pos, &sF)) continue;
-
-            CGFloat yHead = g_sh - sH.y;
-            CGFloat yFoot = g_sh - sF.y;
-            CGFloat h = fabs(yFoot - yHead);
-            if (h < 4 || h > g_sh * 1.5f) continue;
-            CGFloat wpx = h * 0.45f;
-
-            [rects addObject:[NSValue valueWithCGRect:
-                CGRectMake(sH.x - wpx*0.5f, yHead, wpx, h)]];
-            okCount++;
-        }
+    if (g_frame == 120 || g_frame == 600) {
+        w("frame=%d 玩家=%zu 框=%d\n", g_frame, len, ok);
     }
-
-    if (g_frameCount == 60 || g_frameCount == 300) {
-        V3 cp = {0,0,0};
-        if (localCamTf) tf_get_position(localCamTf, &cp);
-        w("frame=%d 实例=%zu 有效=%d 框=%d camTf=%p camPos=(%.1f,%.1f,%.1f)\n",
-          g_frameCount, len, validCount, okCount, localCamTf, cp.x, cp.y, cp.z);
-    }
-
-    g_view.rects = rects;
-    [g_view setNeedsDisplay];
+    [g_view setBoxes:boxes];
 }
 
 // ============================================================
 // 启动
 // ============================================================
-static UIWindow *find_active_window(void) {
+static UIWindow *find_window(void) {
     if (@available(iOS 13.0, *)) {
         for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
             if (![sc isKindOfClass:[UIWindowScene class]]) continue;
@@ -359,18 +354,15 @@ static void boot(void) {
     cls_pc  = find_class("PlayerController");
     cls_obj = find_class("Object");
     cls_cam = find_class("Camera");
-    cls_tf  = find_class("Transform");
-    w("classes pc=%p obj=%p cam=%p tf=%p\n", cls_pc, cls_obj, cls_cam, cls_tf);
-    if (!cls_pc || !cls_obj || !cls_tf) { w("类缺失\n"); return; }
+    w("cls pc=%p obj=%p cam=%p\n", cls_pc, cls_obj, cls_cam);
+    if (!cls_pc || !cls_obj) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *host = find_active_window();
+        UIWindow *host = find_window();
         if (!host) { w("没窗口\n"); return; }
-
         g_sw = host.bounds.size.width;
         g_sh = host.bounds.size.height;
-        g_aspect = g_sw / g_sh;
-        w("host %.0fx%.0f aspect=%.3f\n", g_sw, g_sh, g_aspect);
+        w("屏幕 %.0fx%.0f\n", g_sw, g_sh);
 
         UIWindowScene *ws = host.windowScene;
         g_win = ws ? [[CfOverlayWindow alloc] initWithWindowScene:ws]
@@ -390,7 +382,7 @@ static void boot(void) {
         g_driver = [[CfDriver alloc] init];
         g_link = [CADisplayLink displayLinkWithTarget:g_driver selector:@selector(onTick:)];
         [g_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        w("启动完成\n");
+        w("启动\n");
     });
 }
 
@@ -399,7 +391,7 @@ static void init(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *p = [paths.firstObject stringByAppendingPathComponent:@"cf_esp.txt"];
     g_fp = fopen(p.UTF8String, "w");
-    w("dylib loaded\n");
+    w("v11 loaded\n");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
