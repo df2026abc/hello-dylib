@@ -19,7 +19,7 @@ jobs:
           SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
           clang++ -target arm64-apple-ios15.0 \
             -isysroot "$SDK" \
-            -dynamiclib -fobjc-arc -std=c++17 -O2 \
+            -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
             -Wl,-undefined,dynamic_lookup \
             -Wl,-install_name,@executable_path/cf_probe3.dylib \
             -framework Foundation -framework UIKit \
