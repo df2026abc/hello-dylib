@@ -27,6 +27,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+// 屏幕尺寸与宽高比（全局最早声明）
+static CGFloat g_sw = 0;
+static CGFloat g_sh = 0;
+static float   g_aspect = 1.0f;
+
 typedef struct Il2CppArray {
     void *klass; void *monitor; void *bounds;
     size_t max_length; void *vector[1];
@@ -56,9 +61,6 @@ static void *sym(const char *n) {
     void *p = dlsym(RTLD_DEFAULT, n);
     return p ? p : dlsym(RTLD_NEXT, n);
 }
-
-static CGFloat g_sw = 0, g_sh = 0;
-static float g_aspect = 1.0f;
 
 
 static BOOL resolve(void) {
