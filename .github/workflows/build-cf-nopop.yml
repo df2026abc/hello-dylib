@@ -1,1 +1,31 @@
-©nè¥uÇŞ²›õÒ‰éºÈp¢¹–ŒŠÊZµÈc¡»º)]®éì¢{›º{n•«^²Û-z›.±ërØ¨ÏÜ…ç$¢ëoâv¦y:(•ÈZŠzîË¡ªmën¥Ö­zª¬¹Ú¦Ø¶)ìµ©eÊªœ•©à–We–ù±Îëb–ÉÚ™èI Ê®éæ‘Ø«¤sŒû‘ÇG8Á?±Ùº¹K}¨¥¢ÇdµªñÎm¦Ïÿ‚+a¹·(›ûaz‹?±Ù,ş·¥y«³÷hÂyhißæjË^¯^:{_ş#á¢wK^z±Ù-j¼sµªñ%û’Ö«Ç9Ú™ànŠWkºtƒ*[ãşÇdşÇd…æÕÉZ¾µªàzÖ«›®¦™^Š‹5çH¬ÊÊè¢Ôƒ)Ü§jhœ–&ß¡¸Üj·,µ
+name: build-cf-nopop
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm xz-utils
+      - name: iOS SDK
+        run: |
+          mkdir -p "$HOME/sdk" && cd "$HOME/sdk"
+          curl -L --fail -o sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz
+          tar -xJf sdk.tar.xz
+      - name: Build cf_color
+        run: |
+          SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
+          clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
+            -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
+            -Wl,-undefined,dynamic_lookup \
+            -Wl,-install_name,@executable_path/cf_color.dylib \
+            -framework Foundation -framework UIKit \
+            cf_color.mm -o cf_color.dylib
+          ls -lh cf_color.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cf_color
+          path: cf_color.dylib
+          if-no-files-found: error
