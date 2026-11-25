@@ -87,6 +87,37 @@ static void w(const char *fmt, ...) {
 static CGFloat g_sw = 0, g_sh = 0;
 
 static void *cls_pc = NULL, *cls_obj = NULL;
+static void *g_find_method = NULL;   // 找到的 FindObjectsOfType 方法
+
+// 全库扫描：找到持有 FindObjectsOfType(1 参) 的类和方法
+static void find_object_finder(void) {
+    void *dom = f_domain(); size_t n = 0;
+    void **asms = f_asm(dom, &n);
+    if (!asms) return;
+
+    for (size_t i = 0; i < n && !g_find_method; i++) {
+        if (!asms[i]) continue;
+        void *img = f_img(asms[i]); if (!img) continue;
+        size_t cc = f_cnt(img);
+        for (size_t c = 0; c < cc && !g_find_method; c++) {
+            void *k = f_cls(img, c); if (!k) continue;
+            // 先看类名，只在名字像 Object 的类上试，减少开销
+            const char *nm = f_cname(k);
+            if (!nm) continue;
+            if (strcmp(nm, "Object") && strcmp(nm, "GameObject") && strcmp(nm, "Component"))
+                continue;
+
+            void *m = f_method(k, "FindObjectsOfType", 1);
+            if (m) {
+                g_find_method = m;
+                cls_obj = k;
+                w("找到 FindObjectsOfType: class=%s method=%p\n", nm, m);
+                return;
+            }
+        }
+    }
+    w("全库扫描：没有找到 FindObjectsOfType\n");
+}
 
 static void *find_class(const char *name) {
     void *dom = f_domain(); size_t n = 0;
@@ -266,17 +297,24 @@ static void tick(void);
 static void tick(void) {
     g_frame++;
     if (g_frame == 1) w("tick 进入 view=%p pc=%p obj=%p\n", g_view, cls_pc, cls_obj);
-    if (!g_view || !cls_pc || !cls_obj) return;
+    if (!g_view || !cls_pc) return;
 
-    void *mFind = f_method(cls_obj, "FindObjectsOfType", 1);
-    if (!mFind) { if (g_frame == 1) w("没有 FindObjectsOfType\n"); return; }
+    // 第一次进来时找 FindObjectsOfType
+    if (!g_find_method) {
+        find_object_finder();
+        if (!g_find_method) {
+            if (g_frame == 10) w("frame=%d 仍未找到 FindObjectsOfType\n", g_frame);
+            return;
+        }
+    }
+
     void *t = f_get_type(cls_pc);
     void *type = t ? f_type_obj(t) : NULL;
     if (!type) { if (g_frame == 1) w("type 为空\n"); return; }
 
     void *params[1] = { type };
     void *exc = NULL;
-    void *ret = f_invoke(mFind, NULL, params, &exc);
+    void *ret = f_invoke(g_find_method, NULL, params, &exc);
     if (exc || !ret) { if (g_frame == 1) w("invoke 失败\n"); return; }
 
     Il2CppArray *arr = (Il2CppArray*)ret;
@@ -397,10 +435,9 @@ static void boot(void) {
     if (!resolve()) { w("resolve fail\n"); return; }
     f_attach(f_domain());
 
-    cls_pc  = find_class("PlayerController");
-    cls_obj = find_class("Object");
-    w("cls pc=%p obj=%p\n", cls_pc, cls_obj);
-    if (!cls_pc || !cls_obj) return;
+    cls_pc = find_class("PlayerController");
+    w("cls pc=%p\n", cls_pc);
+    if (!cls_pc) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *host = find_window();
