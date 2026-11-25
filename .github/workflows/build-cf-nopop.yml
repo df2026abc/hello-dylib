@@ -14,29 +14,18 @@ jobs:
           mkdir -p "$HOME/sdk" && cd "$HOME/sdk"
           curl -L --fail -o sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz
           tar -xJf sdk.tar.xz
-      - name: Build cf_esp
+      - name: Build cf_all
         run: |
           SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
           clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
             -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
             -Wl,-undefined,dynamic_lookup \
-            -Wl,-install_name,@executable_path/cf_esp.dylib \
+            -Wl,-install_name,@executable_path/cf_all.dylib \
             -framework Foundation -framework UIKit -framework QuartzCore \
-            cf_esp.mm -o cf_esp.dylib
-      - name: Build cf_color
-        run: |
-          SDK=$(ls -d "$HOME"/sdk/*.sdk | head -1)
-          clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
-            -dynamiclib -fobjc-arc -std=c++17 -O2 -fuse-ld=lld \
-            -Wl,-undefined,dynamic_lookup \
-            -Wl,-install_name,@executable_path/cf_color.dylib \
-            -framework Foundation -framework UIKit \
-            cf_color.mm -o cf_color.dylib
-          ls -lh cf_esp.dylib cf_color.dylib
+            cf_all.mm -o cf_all.dylib
+          ls -lh cf_all.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: cf_both
-          path: |
-            cf_esp.dylib
-            cf_color.dylib
+          name: cf_all
+          path: cf_all.dylib
           if-no-files-found: error
