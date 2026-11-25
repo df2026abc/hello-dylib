@@ -124,6 +124,7 @@ static V3 rd3(void *o, size_t off) {
 // ============================================================
 #define OFF_PC_CAM     0x30
 #define OFF_PC_MV      0x40
+#define OFF_PC_ARMS    0x60
 #define OFF_PC_SK      0x78
 #define OFF_PC_DEAD    0xa8
 #define OFF_MV_POS     0x268
@@ -131,6 +132,14 @@ static V3 rd3(void *o, size_t off) {
 #define OFF_SK_SRCBLEND 0x04
 #define OFF_SK_DSTBLEND 0x08
 #define OFF_SK_GHOST   0x182
+
+// ArmsController 后坐力
+#define OFF_ARMS_RECOIL_V  0x1cc
+#define OFF_ARMS_RECOIL_H  0x1d0
+#define OFF_ARMS_VEL_V     0x1d4
+#define OFF_ARMS_VEL_H     0x1d8
+#define OFF_ARMS_KICK_V    0x1e8
+#define OFF_ARMS_KICK_H    0x1ec
 
 // ============================================================
 // 矩阵投影
@@ -300,7 +309,24 @@ static void tick(void) {
     }
 
     NSMutableArray *boxes = [NSMutableArray array];
-    int boxCount = 0, colorCount = 0;
+    int boxCount = 0, colorCount = 0, recoilCount = 0;
+
+    // ============ 无后座：每帧清零 ============
+    for (size_t i = 0; i < len; i++) {
+        void *pc = arr->vector[i];
+        if (!pc) continue;
+        void *arms = rdp(pc, OFF_PC_ARMS);
+        if (!arms) continue;
+        uint8_t *a = (uint8_t*)arms;
+        float zero = 0.0f;
+        memcpy(a + OFF_ARMS_RECOIL_V, &zero, 4);
+        memcpy(a + OFF_ARMS_RECOIL_H, &zero, 4);
+        memcpy(a + OFF_ARMS_VEL_V,    &zero, 4);
+        memcpy(a + OFF_ARMS_VEL_H,    &zero, 4);
+        memcpy(a + OFF_ARMS_KICK_V,   &zero, 4);
+        memcpy(a + OFF_ARMS_KICK_H,   &zero, 4);
+        recoilCount++;
+    }
 
     if (cam && g_matOK) {
         // 每帧重新读矩阵（相机在动）
@@ -344,8 +370,8 @@ static void tick(void) {
     }
 
     if (g_frame == 1 || g_frame == 120 || g_frame == 600) {
-        w("frame=%d 玩家=%zu 矩阵=%s 框=%d 上色=%d\n",
-          g_frame, len, g_matOK ? "OK" : "无", boxCount, colorCount);
+        w("frame=%d 玩家=%zu 矩阵=%s 框=%d 上色=%d 无后座=%d\n",
+          g_frame, len, g_matOK ? "OK" : "无", boxCount, colorCount, recoilCount);
     }
 
     [g_view setBoxes:boxes];
