@@ -57,6 +57,10 @@ static void *sym(const char *n) {
     return p ? p : dlsym(RTLD_NEXT, n);
 }
 
+static CGFloat g_sw = 0, g_sh = 0;
+static float g_aspect = 1.0f;
+
+
 static BOOL resolve(void) {
     f_domain=(p_domain_get)sym("il2cpp_domain_get");
     f_asm=(p_domain_get_assemblies)sym("il2cpp_domain_get_assemblies");
@@ -240,8 +244,6 @@ static CfEspView *g_view = nil;
 static UIWindow *g_win = nil;
 static CADisplayLink *g_link = nil;
 static id g_driver = nil;
-static CGFloat g_sw = 0, g_sh = 0;
-static float g_aspect = 1.0f;
 static int g_frameCount = 0;
 
 static void draw_once(void);
